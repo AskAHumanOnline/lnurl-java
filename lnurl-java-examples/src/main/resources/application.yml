@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: lnurl-java-examples
+
+server:
+  port: 8090
+
+lnurl:
+  auth:
+    base-url: http://localhost:8090
+    challenge-expiry-seconds: 300
+  pay:
+    fail-on-resolution-error: false
+  lnd:
+    host: localhost
+    rest-port: 10009
+    macaroon-path: ""
+    tls-cert-path: ""
