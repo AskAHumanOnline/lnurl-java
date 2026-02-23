@@ -61,13 +61,14 @@ public class LndClient {
 
     /**
      * Create an LndClient with an already hex-encoded macaroon and a pre-built HttpClient.
+     * Package-private to allow test injection of a mock HttpClient.
      *
      * @param host       LND host
      * @param restPort   LND REST port
      * @param macaroon   hex-encoded admin macaroon
      * @param httpClient the HTTP client to use (should be configured with TLS if needed)
      */
-    private LndClient(String host, int restPort, String macaroon, HttpClient httpClient) {
+    LndClient(String host, int restPort, String macaroon, HttpClient httpClient) {
         this.baseUrl = "https://" + host + ":" + restPort;
         this.macaroon = macaroon;
         this.httpClient = httpClient;
