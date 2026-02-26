@@ -27,23 +27,23 @@ class LnurlPayClientTest {
     class LightningAddressParsing {
 
         @Test
-        @DisplayName("should reject invalid format (no @)")
+        @DisplayName("should reject invalid format (no @) — always throws regardless of mode")
         void shouldRejectInvalidFormat() {
             LnurlPayClient service = LnurlPayClient.create(false);
 
-            // Act & Assert: mock mode should return mock invoice instead of throwing
-            String result = service.resolveLightningAddress("invalid", 1000);
-            assertTrue(result.startsWith("mock_invoice_"));
+            // Input validation errors are never swallowed by lenient mode
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.resolveLightningAddress("invalid", 1000));
         }
 
         @Test
-        @DisplayName("should reject invalid format (multiple @)")
+        @DisplayName("should reject invalid format (multiple @) — always throws regardless of mode")
         void shouldRejectMultipleAt() {
             LnurlPayClient service = LnurlPayClient.create(false);
 
-            // Act & Assert: mock mode should return mock invoice instead of throwing
-            String result = service.resolveLightningAddress("alice@domain@com", 1000);
-            assertTrue(result.startsWith("mock_invoice_"));
+            // Input validation errors are never swallowed by lenient mode
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.resolveLightningAddress("alice@domain@com", 1000));
         }
 
         @Test
@@ -51,13 +51,14 @@ class LnurlPayClientTest {
         void shouldParseValidAddress() {
             LnurlPayClient service = LnurlPayClient.create(false);
 
-            // Act: Will fail LNURL resolution (no real provider), but should parse format correctly
-            String result = service.resolveLightningAddress("alice@getalby.com", 1000);
+            // Use .invalid TLD (RFC 2606 — guaranteed non-resolvable) so the request fails
+            // with a genuine DNS/network IOException, not an application-level error.
+            String result = service.resolveLightningAddress("alice@nonexistent.invalid", 1000);
 
             // Assert: Should return mock invoice in development mode
             assertNotNull(result);
             assertTrue(result.startsWith("mock_invoice_"));
-            assertTrue(result.contains("alice@getalby.com"));
+            assertTrue(result.contains("alice@nonexistent.invalid"));
             assertTrue(result.contains("1000"));
         }
     }
@@ -125,14 +126,22 @@ class LnurlPayClientTest {
         }
 
         @Test
-        @DisplayName("should handle zero amount gracefully")
-        void shouldHandleZeroAmount() {
+        @DisplayName("should reject zero amount — always throws regardless of mode")
+        void shouldRejectZeroAmount() {
             LnurlPayClient service = LnurlPayClient.create(false);
 
-            // Mock mode should still work
-            String invoice = service.resolveLightningAddress("alice@test.com", 0);
-            assertNotNull(invoice);
-            assertTrue(invoice.contains("0"));
+            // Zero is not a valid payment amount — rejected before any network activity
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.resolveLightningAddress("alice@test.com", 0));
+        }
+
+        @Test
+        @DisplayName("should reject negative amount — always throws regardless of mode")
+        void shouldRejectNegativeAmount() {
+            LnurlPayClient service = LnurlPayClient.create(false);
+
+            assertThrows(IllegalArgumentException.class,
+                    () -> service.resolveLightningAddress("alice@test.com", -100));
         }
 
         @Test
@@ -287,8 +296,14 @@ class LnurlPayClientTest {
 
         @SuppressWarnings("unchecked")
         private LnurlPayClient clientWithOneResponse(String body) throws Exception {
+            return clientWithOneResponse(200, body);
+        }
+
+        @SuppressWarnings("unchecked")
+        private LnurlPayClient clientWithOneResponse(int statusCode, String body) throws Exception {
             HttpClient mockHttp = mock(HttpClient.class);
             HttpResponse<String> resp = mock(HttpResponse.class);
+            when(resp.statusCode()).thenReturn(statusCode);
             when(resp.body()).thenReturn(body);
             doReturn(resp).when(mockHttp).send(any(HttpRequest.class), any());
             return new LnurlPayClient(mockHttp, true);
@@ -299,6 +314,8 @@ class LnurlPayClientTest {
             HttpClient mockHttp = mock(HttpClient.class);
             HttpResponse<String> first = mock(HttpResponse.class);
             HttpResponse<String> second = mock(HttpResponse.class);
+            when(first.statusCode()).thenReturn(200);
+            when(second.statusCode()).thenReturn(200);
             when(first.body()).thenReturn(firstBody);
             when(second.body()).thenReturn(secondBody);
             doReturn(first).doReturn(second).when(mockHttp).send(any(HttpRequest.class), any());
@@ -365,6 +382,37 @@ class LnurlPayClientTest {
 
             assertThrows(RuntimeException.class,
                     () -> client.resolveLightningAddress("alice@example.com", 1000));
+        }
+
+        @Test
+        @DisplayName("HTTP 404 from endpoint throws RuntimeException")
+        void endpointReturns404_throwsRuntimeException() throws Exception {
+            LnurlPayClient client = clientWithOneResponse(404, "{\"status\":\"ERROR\"}");
+
+            RuntimeException ex = assertThrows(RuntimeException.class,
+                    () -> client.resolveLightningAddress("alice@example.com", 1000));
+            assertTrue(ex.getMessage().contains("HTTP 404"),
+                    "Exception message should include HTTP status code");
+        }
+
+        @Test
+        @DisplayName("HTTP 500 from invoice endpoint throws RuntimeException")
+        void invoiceEndpointReturns500_throwsRuntimeException() throws Exception {
+            // Endpoint succeeds (200) but invoice request fails (500)
+            HttpClient mockHttp = mock(HttpClient.class);
+            HttpResponse<String> endpointResp = mock(HttpResponse.class);
+            HttpResponse<String> invoiceResp = mock(HttpResponse.class);
+            when(endpointResp.statusCode()).thenReturn(200);
+            when(endpointResp.body()).thenReturn(ENDPOINT_JSON);
+            when(invoiceResp.statusCode()).thenReturn(500);
+            when(invoiceResp.body()).thenReturn("{\"error\":\"internal error\"}");
+            doReturn(endpointResp).doReturn(invoiceResp).when(mockHttp).send(any(HttpRequest.class), any());
+            LnurlPayClient client = new LnurlPayClient(mockHttp, true);
+
+            RuntimeException ex = assertThrows(RuntimeException.class,
+                    () -> client.resolveLightningAddress("alice@example.com", 1000));
+            assertTrue(ex.getMessage().contains("HTTP 500"),
+                    "Exception message should include HTTP status code");
         }
     }
 }

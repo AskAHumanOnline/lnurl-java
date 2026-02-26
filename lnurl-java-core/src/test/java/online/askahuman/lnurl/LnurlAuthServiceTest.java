@@ -285,6 +285,25 @@ class LnurlAuthServiceTest {
         assertFalse(result, "Should return false for non-hex key (even if correct length)");
     }
 
+    /**
+     * Security invariant: a successful verifyCallback is single-use.
+     * A second call with the same k1 (replay attack) must return false.
+     */
+    @Test
+    void verifyCallbackSecondCallReturnsFalseAfterSuccess() throws Exception {
+        // Given
+        String k1 = lnurlAuthService.generateChallenge();
+        String validSig = signChallenge(k1);
+
+        // First call succeeds
+        assertTrue(lnurlAuthService.verifyCallback(k1, validSig, testPublicKeyHex),
+                "First verifyCallback should succeed");
+
+        // Replay with the same (k1, sig, key) tuple must be rejected
+        assertFalse(lnurlAuthService.verifyCallback(k1, validSig, testPublicKeyHex),
+                "Replay of a verified challenge must return false (single-use enforcement)");
+    }
+
     // -------------------------------------------------------------------------
     // verifyCallback — expiry
     // -------------------------------------------------------------------------

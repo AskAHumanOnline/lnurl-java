@@ -26,6 +26,9 @@ public class LnurlAuthService {
 
     private static final System.Logger log = System.getLogger(LnurlAuthService.class.getName());
 
+    /** Cap to prevent memory exhaustion via challenge-flood attacks (standalone mode). */
+    private static final int MAX_CHALLENGES = 10_000;
+
     private final Map<String, AuthChallenge> challenges = new ConcurrentHashMap<>();
     private final SecureRandom secureRandom = new SecureRandom();
     private final int challengeExpirySeconds;
@@ -52,9 +55,10 @@ public class LnurlAuthService {
      * @param k1         hex-encoded 32-byte challenge
      * @param expiresAt  when this challenge expires
      * @param linkingKey the wallet's compressed public key (hex), null until authenticated
+     * @param verified   true once a valid signature has been accepted; prevents replay attacks
      */
-    public record AuthChallenge(String k1, Instant expiresAt, String linkingKey) {
-        // linkingKey is null until the wallet responds
+    public record AuthChallenge(String k1, Instant expiresAt, String linkingKey, boolean verified) {
+        // linkingKey is null until the wallet responds; verified prevents replay of the same (k1, sig, key) tuple
     }
 
     /**
@@ -63,11 +67,16 @@ public class LnurlAuthService {
      * @return hex-encoded 32-byte random k1 value
      */
     public String generateChallenge() {
+        if (challenges.size() >= MAX_CHALLENGES) {
+            throw new IllegalStateException(
+                    "Cannot generate new challenge: challenge map at capacity (" + MAX_CHALLENGES +
+                    "). Call cleanupExpiredChallenges() to free space.");
+        }
         byte[] k1Bytes = new byte[32];
         secureRandom.nextBytes(k1Bytes);
         String k1 = HexFormat.of().formatHex(k1Bytes);
 
-        challenges.put(k1, new AuthChallenge(k1, Instant.now().plusSeconds(challengeExpirySeconds), null));
+        challenges.put(k1, new AuthChallenge(k1, Instant.now().plusSeconds(challengeExpirySeconds), null, false));
         log.log(System.Logger.Level.DEBUG, "Generated LNURL-auth challenge: {0}", k1);
         return k1;
     }
@@ -87,18 +96,23 @@ public class LnurlAuthService {
     public boolean verifyCallback(String k1, String sig, String key) {
         AuthChallenge challenge = challenges.get(k1);
         if (challenge == null) {
-            log.log(System.Logger.Level.WARNING, "Challenge not found for k1: {0}", k1);
+            log.log(System.Logger.Level.WARNING, "Challenge not found for k1: {0}...", truncate(k1));
             return false;
         }
         if (Instant.now().isAfter(challenge.expiresAt())) {
             challenges.remove(k1);
-            log.log(System.Logger.Level.WARNING, "Challenge expired for k1: {0}", k1);
+            log.log(System.Logger.Level.WARNING, "Challenge expired for k1: {0}...", truncate(k1));
+            return false;
+        }
+        // Prevent replay: once a valid signature has been accepted, reject further attempts
+        if (challenge.verified()) {
+            log.log(System.Logger.Level.WARNING, "Challenge already verified (replay attempt) for k1: {0}...", truncate(k1));
             return false;
         }
 
         // Validate input format
         if (sig == null || sig.isEmpty() || sig.length() < 140 || sig.length() > 144 || key == null || key.length() != 66) {
-            log.log(System.Logger.Level.WARNING, "Invalid sig or key format for k1: {0} (key must be 66 hex chars)", k1);
+            log.log(System.Logger.Level.WARNING, "Invalid sig or key format for k1: {0}... (key must be 66 hex chars)", truncate(k1));
             return false;
         }
 
@@ -110,22 +124,27 @@ public class LnurlAuthService {
 
             // Verify signature using secp256k1
             if (!verifySecp256k1Signature(k1Bytes, sigBytes, keyBytes)) {
-                log.log(System.Logger.Level.WARNING, "Signature verification failed for k1: {0}", k1);
+                log.log(System.Logger.Level.WARNING, "Signature verification failed for k1: {0}...", truncate(k1));
                 return false;
             }
 
-            // Store the linking key with the challenge (marks it as authenticated)
-            challenges.put(k1, new AuthChallenge(k1, challenge.expiresAt(), key));
-            log.log(System.Logger.Level.DEBUG, "LNURL-auth callback verified for k1: {0}, key: {1}", k1, key);
+            // Mark challenge as verified (single-use) and store the linking key
+            challenges.put(k1, new AuthChallenge(k1, challenge.expiresAt(), key, true));
+            log.log(System.Logger.Level.DEBUG, "LNURL-auth callback verified for k1: {0}...", truncate(k1));
             return true;
 
         } catch (IllegalArgumentException e) {
             log.log(System.Logger.Level.ERROR, "Invalid hex encoding in LNURL-auth callback: {0}", e.getMessage());
             return false;
         } catch (Exception e) {
-            log.log(System.Logger.Level.ERROR, "Signature verification error for k1: {0}: {1}", k1, e.getMessage());
+            log.log(System.Logger.Level.ERROR, "Signature verification error for k1: {0}...: {1}", truncate(k1), e.getMessage());
             return false;
         }
+    }
+
+    /** Returns the first 8 characters of a k1 for safe log output (avoids leaking full auth tokens). */
+    private static String truncate(String k1) {
+        return (k1 != null && k1.length() > 8) ? k1.substring(0, 8) : k1;
     }
 
     /**
