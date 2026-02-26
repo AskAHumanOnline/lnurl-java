@@ -26,6 +26,9 @@ public class LnurlAuthService {
 
     private static final System.Logger log = System.getLogger(LnurlAuthService.class.getName());
 
+    /** Cap to prevent memory exhaustion via challenge-flood attacks (standalone mode). */
+    private static final int MAX_CHALLENGES = 10_000;
+
     private final Map<String, AuthChallenge> challenges = new ConcurrentHashMap<>();
     private final SecureRandom secureRandom = new SecureRandom();
     private final int challengeExpirySeconds;
@@ -64,6 +67,11 @@ public class LnurlAuthService {
      * @return hex-encoded 32-byte random k1 value
      */
     public String generateChallenge() {
+        if (challenges.size() >= MAX_CHALLENGES) {
+            throw new IllegalStateException(
+                    "Cannot generate new challenge: challenge map at capacity (" + MAX_CHALLENGES +
+                    "). Call cleanupExpiredChallenges() to free space.");
+        }
         byte[] k1Bytes = new byte[32];
         secureRandom.nextBytes(k1Bytes);
         String k1 = HexFormat.of().formatHex(k1Bytes);

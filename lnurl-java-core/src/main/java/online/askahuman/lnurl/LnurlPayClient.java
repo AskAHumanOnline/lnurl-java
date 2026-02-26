@@ -67,12 +67,20 @@ public class LnurlPayClient {
      * Resolve a Lightning address to a BOLT11 invoice using the LNURL-pay protocol.
      *
      * @param lightningAddress Lightning address in format "username@domain.com"
-     * @param amountSats       payout amount in satoshis
+     * @param amountSats       payout amount in satoshis (must be &gt; 0)
      * @return BOLT11 invoice string (or mock invoice if resolution fails and failOnResolutionError=false)
-     * @throws RuntimeException if resolution fails and failOnResolutionError=true
+     * @throws IllegalArgumentException if the address format is invalid, the amount is &lt;= 0,
+     *                                  or the amount falls outside provider limits
+     * @throws RuntimeException         if resolution fails and failOnResolutionError=true
      */
-    public String resolveLightningAddress(String lightningAddress, int amountSats) {
+    public String resolveLightningAddress(String lightningAddress, long amountSats) {
         try {
+            // Validate amount before any network activity
+            if (amountSats <= 0) {
+                throw new IllegalArgumentException(
+                        "amountSats must be greater than 0, got: " + amountSats);
+            }
+
             log.log(System.Logger.Level.DEBUG,
                     "Resolving Lightning address: {0} for {1} sats", lightningAddress, amountSats);
 
@@ -109,6 +117,11 @@ public class LnurlPayClient {
             HttpResponse<String> endpointResponse = httpClient.send(
                     endpointRequest, HttpResponse.BodyHandlers.ofString());
 
+            if (endpointResponse.statusCode() != 200) {
+                throw new RuntimeException(
+                        "LNURL-pay endpoint returned HTTP " + endpointResponse.statusCode());
+            }
+
             LnurlPayEndpoint endpoint = objectMapper.readValue(
                     endpointResponse.body(), LnurlPayEndpoint.class);
 
@@ -122,7 +135,7 @@ public class LnurlPayClient {
                         "Invalid LNURL-pay tag: expected 'payRequest', got '" + endpoint.getTag() + "'");
             }
 
-            // Step 3: Validate amount
+            // Step 3: Validate amount against provider limits
             long amountMillisats = amountSats * 1000L;
             if (amountMillisats < endpoint.getMinSendable()) {
                 throw new IllegalArgumentException(
@@ -154,6 +167,11 @@ public class LnurlPayClient {
             HttpResponse<String> invoiceResponse = httpClient.send(
                     invoiceRequest, HttpResponse.BodyHandlers.ofString());
 
+            if (invoiceResponse.statusCode() != 200) {
+                throw new RuntimeException(
+                        "LNURL-pay invoice endpoint returned HTTP " + invoiceResponse.statusCode());
+            }
+
             LnurlPayInvoiceResponse invoiceResult = objectMapper.readValue(
                     invoiceResponse.body(), LnurlPayInvoiceResponse.class);
 
@@ -167,13 +185,16 @@ public class LnurlPayClient {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return handleResolutionError(lightningAddress, amountSats, e);
+            throw new RuntimeException("LNURL-pay request interrupted", e);
+        } catch (IllegalArgumentException e) {
+            // Input validation failures always propagate — not swallowed by lenient mode
+            throw e;
         } catch (Exception e) {
             return handleResolutionError(lightningAddress, amountSats, e);
         }
     }
 
-    private String handleResolutionError(String lightningAddress, int amountSats, Exception e) {
+    private String handleResolutionError(String lightningAddress, long amountSats, Exception e) {
         log.log(System.Logger.Level.WARNING,
                 "LNURL-pay resolution failed for {0}: {1}", lightningAddress, e.getMessage());
 
