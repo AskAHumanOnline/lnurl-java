@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>This is a pure Java implementation with no Spring dependencies.
  * Uses {@link java.net.http.HttpClient} for HTTP calls and Jackson for JSON parsing.</p>
  */
-public class LndClient {
+public class LndClient implements AutoCloseable {
 
     private static final System.Logger log = System.getLogger(LndClient.class.getName());
 
@@ -62,7 +62,8 @@ public class LndClient {
     private final String baseUrl;
     private final String macaroon;
     private final HttpClient httpClient;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = configuredObjectMapper();
+    private final SecureRandom secureRandom = new SecureRandom();
     private final Map<String, MockPaymentData> mockPayments = new ConcurrentHashMap<>();
     private final AtomicBoolean mockMode = new AtomicBoolean(false);
     private final boolean strictMode;
@@ -148,6 +149,17 @@ public class LndClient {
         return new LndClient(host, restPort, macaroonValue, builder.build(), true);
     }
 
+    @Override
+    public void close() {
+        httpClient.close();
+    }
+
+    private static ObjectMapper configuredObjectMapper() {
+        ObjectMapper om = new ObjectMapper();
+        om.deactivateDefaultTyping();
+        return om;
+    }
+
     /**
      * Create a Lightning invoice.
      *
@@ -197,7 +209,7 @@ public class LndClient {
                 "LND not available, creating mock invoice for testing: {0}", cause.getMessage());
         try {
             byte[] preimageBytes = new byte[32];
-            new SecureRandom().nextBytes(preimageBytes);
+            secureRandom.nextBytes(preimageBytes);
             String preimageHex = bytesToHex(preimageBytes);
             byte[] hashBytes = MessageDigest.getInstance("SHA-256").digest(preimageBytes);
             String paymentHashHex = bytesToHex(hashBytes);
