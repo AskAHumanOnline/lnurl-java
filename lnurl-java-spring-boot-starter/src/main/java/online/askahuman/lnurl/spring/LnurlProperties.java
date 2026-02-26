@@ -58,8 +58,12 @@ public class LnurlProperties {
         /** LND host. */
         private String host = "localhost";
 
-        /** LND REST API port. */
-        private int restPort = 8080;
+        /**
+         * LND REST API port. Default 8181 avoids conflict with Spring Boot's default server
+         * port (8080). LND's built-in default is also 8080 — set explicitly when running
+         * both on the same host.
+         */
+        private int restPort = 8181;
 
         /** Path to the LND admin macaroon file. */
         private String macaroonPath = "";

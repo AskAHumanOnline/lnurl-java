@@ -1,5 +1,6 @@
 package online.askahuman.lnurl.lnd;
 
+import online.askahuman.lnurl.LnurlException;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -32,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Provides invoice creation, payment status checking, and invoice payment via the LND REST API.</p>
  *
- * <p><strong>Strict mode (default):</strong> When LND is unavailable, methods throw {@link RuntimeException}
+ * <p><strong>Strict mode (default):</strong> When LND is unavailable, methods throw {@link online.askahuman.lnurl.LnurlException}
  * instead of silently returning mock data. Use this in production to prevent fake invoices from
  * being treated as real payments. The {@link #withMacaroonFile} factory and public constructors
  * use strict mode by default.</p>
@@ -167,7 +168,7 @@ public class LndClient implements AutoCloseable {
      * @param memo          invoice memo/description
      * @param expirySeconds invoice expiry time in seconds
      * @return the created invoice response
-     * @throws RuntimeException if LND is unavailable and strict mode is enabled
+     * @throws LnurlException if LND is unavailable and strict mode is enabled
      */
     public CreateInvoiceResponse createInvoice(long amountSats, String memo, long expirySeconds) {
         try {
@@ -194,7 +195,7 @@ public class LndClient implements AutoCloseable {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("LND request interrupted", e);
+            throw new LnurlException("LND request interrupted", e);
         } catch (Exception e) {
             return createMockInvoice(amountSats, e);
         }
@@ -202,7 +203,7 @@ public class LndClient implements AutoCloseable {
 
     private CreateInvoiceResponse createMockInvoice(long amountSats, Exception cause) {
         if (strictMode) {
-            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+            throw new LnurlException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
         }
         mockMode.set(true);
         log.log(System.Logger.Level.WARNING,
@@ -226,7 +227,7 @@ public class LndClient implements AutoCloseable {
                     null
             );
         } catch (Exception ex) {
-            throw new RuntimeException("Failed to generate mock invoice", ex);
+            throw new LnurlException("Failed to generate mock invoice", ex);
         }
     }
 
@@ -258,7 +259,7 @@ public class LndClient implements AutoCloseable {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("LND request interrupted", e);
+            throw new LnurlException("LND request interrupted", e);
         } catch (Exception e) {
             return checkMockPayment(paymentHash, e);
         }
@@ -266,7 +267,7 @@ public class LndClient implements AutoCloseable {
 
     private boolean checkMockPayment(String paymentHash, Exception cause) {
         if (strictMode) {
-            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+            throw new LnurlException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
         }
         mockMode.set(true);
         log.log(System.Logger.Level.WARNING,
@@ -280,6 +281,9 @@ public class LndClient implements AutoCloseable {
 
     /**
      * Returns true if the last LND API call succeeded (real mode), false if mock mode.
+     *
+     * @return {@code true} if the most recent LND API call reached a real LND node,
+     *         {@code false} if the client fell back to mock mode
      */
     public boolean isConnected() {
         return !mockMode.get();
@@ -287,10 +291,10 @@ public class LndClient implements AutoCloseable {
 
     /**
      * Returns the mock preimage for a given payment hash (mock mode only).
-     * Returns null if the hash was not created in mock mode or is unknown.
      *
      * @param paymentHash the payment hash to look up
-     * @return the mock preimage hex string, or null
+     * @return the mock preimage hex string, or {@code null} if this hash was not generated
+     *         in mock mode, is not tracked by this client instance, or was never created
      */
     public String getMockPreimage(String paymentHash) {
         MockPaymentData data = mockPayments.get(paymentHash);
@@ -319,7 +323,7 @@ public class LndClient implements AutoCloseable {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("LND request interrupted", e);
+            throw new LnurlException("LND request interrupted", e);
         } catch (Exception e) {
             return createMockInvoiceDetails(paymentHash, e);
         }
@@ -327,7 +331,7 @@ public class LndClient implements AutoCloseable {
 
     private Invoice createMockInvoiceDetails(String paymentHash, Exception cause) {
         if (strictMode) {
-            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+            throw new LnurlException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
         }
         log.log(System.Logger.Level.WARNING,
                 "LND not available, returning mock invoice for testing: {0}", cause.getMessage());
@@ -352,7 +356,7 @@ public class LndClient implements AutoCloseable {
      *
      * @param paymentRequest the BOLT11 invoice to pay
      * @return the payment response
-     * @throws RuntimeException if LND is unavailable and strict mode is enabled
+     * @throws LnurlException if LND is unavailable and strict mode is enabled
      */
     public PayInvoiceResponse payInvoice(String paymentRequest) {
         try {
@@ -379,7 +383,7 @@ public class LndClient implements AutoCloseable {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("LND request interrupted", e);
+            throw new LnurlException("LND request interrupted", e);
         } catch (Exception e) {
             return createMockPayResponse(e);
         }
@@ -387,7 +391,7 @@ public class LndClient implements AutoCloseable {
 
     private PayInvoiceResponse createMockPayResponse(Exception cause) {
         if (strictMode) {
-            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+            throw new LnurlException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
         }
         log.log(System.Logger.Level.WARNING,
                 "LND not available or payment failed, using mock payment: {0}", cause.getMessage());
@@ -407,7 +411,7 @@ public class LndClient implements AutoCloseable {
                 .map(String::trim)
                 .filter(line -> !line.isEmpty())
                 .reduce((first, second) -> second)
-                .orElseThrow(() -> new RuntimeException("Empty response from /v2/router/send"));
+                .orElseThrow(() -> new LnurlException("Empty response from /v2/router/send"));
 
         JsonNode root = objectMapper.readTree(lastLine);
         JsonNode result = root.path("result");
@@ -415,7 +419,7 @@ public class LndClient implements AutoCloseable {
         String status = result.path("status").asText("UNKNOWN");
         if ("FAILED".equals(status)) {
             String reason = result.path("failure_reason").asText("unknown");
-            throw new RuntimeException("Payment failed: " + reason);
+            throw new LnurlException("Payment failed: " + reason);
         }
 
         return new PayInvoiceResponse(
@@ -494,6 +498,10 @@ public class LndClient implements AutoCloseable {
 
     /**
      * Response from LND invoice creation (/v1/invoices).
+     *
+     * @param rHash          SHA-256 payment hash (hex)
+     * @param paymentRequest BOLT11-encoded invoice string
+     * @param addIndex       monotonically increasing invoice index (may be null)
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record CreateInvoiceResponse(
@@ -504,6 +512,13 @@ public class LndClient implements AutoCloseable {
 
     /**
      * LND invoice details (/v1/invoice/{hash}).
+     *
+     * @param memo           invoice description
+     * @param rHash          SHA-256 payment hash (hex)
+     * @param paymentRequest BOLT11-encoded invoice string
+     * @param value          invoice amount in satoshis (as a string)
+     * @param state          invoice state (e.g. {@code OPEN}, {@code SETTLED}, {@code CANCELED})
+     * @param settleDate     Unix timestamp when the invoice was settled (may be null)
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Invoice(
@@ -517,6 +532,10 @@ public class LndClient implements AutoCloseable {
 
     /**
      * Response from LND payment (/v2/router/send).
+     *
+     * @param paymentHash     SHA-256 hash of the payment preimage
+     * @param paymentPreimage 32-byte preimage that proves payment (hex)
+     * @param status          final payment status (e.g. {@code SUCCEEDED}, {@code FAILED})
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record PayInvoiceResponse(
