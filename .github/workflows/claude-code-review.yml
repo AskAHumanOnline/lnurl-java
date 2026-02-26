@@ -1,0 +1,140 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Security Scan
+        id: security-scan
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are a senior security engineer specialising in Java cryptography libraries, LNURL protocols, and Lightning Network integrations. Your task is to perform a thorough security review of this pull request.
+
+            **PR:** ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+            **Branch:** `${{ github.head_ref }}` → `${{ github.base_ref }}`
+
+            ## What to Review
+
+            Fetch and analyse only the files changed in this PR. Focus exclusively on the diff — do not audit the entire codebase.
+
+            Run these checks on every changed file:
+
+            ### 1. OWASP Top 10
+            - Injection (command, expression language)
+            - Sensitive data exposure (secrets, keys, challenge bytes in logs or responses)
+            - XXE in XML parsing
+            - Insecure deserialization of untrusted data
+            - Vulnerable/outdated dependency versions
+
+            ### 2. Library API Surface
+            - Unintentionally public classes or methods that expose internal state
+            - Mutable objects returned from public API (defensive copy missing)
+            - Missing `@NonNull` / null guards on public API boundaries
+            - Checked vs unchecked exception contracts (should library callers be forced to handle?)
+
+            ### 3. LNURL Protocol Security (LUD-01, LUD-04, LUD-06)
+            - **Bech32**: encoding/decoding edge cases — invalid checksums accepted, wrong HRP tolerated
+            - **LNURL-auth (LUD-04)**: secp256k1 signature verification correctness; wrong algorithm used (must be `NONEwithECDSA`, NOT `SHA256withECDSA` which double-hashes k1); replay protection
+            - **LNURL-pay (LUD-06)**: amount range validation (min/max sats respected); unvalidated callback URL (open redirect, SSRF); missing HTTPS enforcement on callback
+            - **k1 challenge entropy**: insufficient randomness in challenge generation (must be cryptographically secure 32 bytes)
+            - **Timing attacks** in signature comparison or challenge lookup
+
+            ### 4. HTTP Client Security (LND REST Client)
+            - SSRF via unvalidated or caller-controlled base URLs
+            - TLS certificate validation disabled or skipped
+            - Macaroon hex bytes logged at any level
+            - Missing connection / read timeouts (DoS via slow responses)
+            - Sensitive headers included in error messages or logs
+
+            ### 5. Input Validation & Data Integrity
+            - Missing null / empty checks on Lightning address components (user, domain)
+            - Integer overflow in millisat/sat arithmetic (use `long`, not `int`)
+            - Missing validation of LNURL response fields (null callback, missing minSendable)
+            - Path traversal via user-supplied macaroon or cert file paths
+
+            ### 6. Secrets & Credentials
+            - Hardcoded macaroon bytes, TLS certificates, or API keys in source code
+            - Secrets logged at any level (DEBUG included)
+            - Unsafe default values for security-critical config
+
+            ### 7. Race Conditions & Concurrency
+            - Non-atomic check-then-act on shared challenge stores
+            - Missing synchronisation on mutable shared state in auto-configured beans
+
+            ## Severity Scale
+
+            | Severity | Criteria |
+            |----------|----------|
+            | CRITICAL | Exploitable without auth; funds at risk or signature bypass |
+            | HIGH     | Exploitable under specific conditions; protocol correctness broken |
+            | MEDIUM   | Defence-in-depth weakness; indirect risk |
+            | LOW      | Best-practice deviation; low impact |
+            | INFO     | Observation; no direct security impact |
+
+            ## Output Format
+
+            Post your findings as a PR comment with this structure:
+
+            ```
+            ## Security Scan Results
+
+            ### Summary
+            <one-paragraph executive summary>
+
+            ### Findings
+
+            #### [SEVERITY] Short Title
+            **File:** `path/to/File.java:line`
+            **Description:** What the vulnerability is and why it matters.
+            **Recommendation:** Specific fix with code example if helpful.
+
+            ---
+            ```
+
+            If no issues are found, post:
+            ```
+            ## Security Scan Results
+            No security issues found in this PR. ✅
+            ```
+
+            Always post the comment even when there are no findings.
