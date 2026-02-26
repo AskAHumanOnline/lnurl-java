@@ -25,6 +25,11 @@ import java.time.Duration;
  *
  * <p>This is a pure Java implementation with no Spring dependencies.
  * Uses {@link java.net.http.HttpClient} for HTTP calls and Jackson for JSON parsing.</p>
+ *
+ * <p><strong>Redirect behaviour:</strong> The default {@code HttpClient} (created via
+ * {@link #create(boolean)}) follows HTTP redirects. Callers that require stricter control
+ * can supply a custom client via {@link #LnurlPayClient(HttpClient, boolean)} configured with
+ * {@code HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()}.</p>
  */
 public class LnurlPayClient implements AutoCloseable {
 
@@ -72,7 +77,7 @@ public class LnurlPayClient implements AutoCloseable {
      * @return BOLT11 invoice string (or mock invoice if resolution fails and failOnResolutionError=false)
      * @throws IllegalArgumentException if the address format is invalid, the amount is &lt;= 0,
      *                                  or the amount falls outside provider limits
-     * @throws RuntimeException         if resolution fails and failOnResolutionError=true
+     * @throws LnurlException           if resolution fails and failOnResolutionError=true
      */
     public String resolveLightningAddress(String lightningAddress, long amountSats) {
         try {
@@ -121,7 +126,7 @@ public class LnurlPayClient implements AutoCloseable {
                     endpointRequest, HttpResponse.BodyHandlers.ofString());
 
             if (endpointResponse.statusCode() != 200) {
-                throw new RuntimeException(
+                throw new LnurlException(
                         "LNURL-pay endpoint returned HTTP " + endpointResponse.statusCode());
             }
 
@@ -129,12 +134,12 @@ public class LnurlPayClient implements AutoCloseable {
                     endpointResponse.body(), LnurlPayEndpoint.class);
 
             if (endpoint == null || endpoint.getCallback() == null) {
-                throw new RuntimeException("Invalid LNURL-pay endpoint response");
+                throw new LnurlException("Invalid LNURL-pay endpoint response");
             }
 
             // Validate tag
             if (!"payRequest".equals(endpoint.getTag())) {
-                throw new RuntimeException(
+                throw new LnurlException(
                         "Invalid LNURL-pay tag: expected 'payRequest', got '" + endpoint.getTag() + "'");
             }
 
@@ -154,12 +159,12 @@ public class LnurlPayClient implements AutoCloseable {
             // Validate callback URL scheme to prevent SSRF
             URI callbackUri = URI.create(endpoint.getCallback());
             if (callbackUri.getScheme() == null || !callbackUri.getScheme().equals("https")) {
-                throw new RuntimeException("LNURL-pay callback URL must use HTTPS scheme");
+                throw new LnurlException("LNURL-pay callback URL must use HTTPS scheme");
             }
             // H-01: Callback host must match (or be a subdomain of) the provider domain
             String callbackHost = callbackUri.getHost();
             if (!isAllowedCallbackDomain(callbackHost, domain)) {
-                throw new RuntimeException(
+                throw new LnurlException(
                         "LNURL-pay callback host '" + callbackHost +
                         "' does not match provider domain '" + domain + "'");
             }
@@ -180,7 +185,7 @@ public class LnurlPayClient implements AutoCloseable {
                     invoiceRequest, HttpResponse.BodyHandlers.ofString());
 
             if (invoiceResponse.statusCode() != 200) {
-                throw new RuntimeException(
+                throw new LnurlException(
                         "LNURL-pay invoice endpoint returned HTTP " + invoiceResponse.statusCode());
             }
 
@@ -188,7 +193,7 @@ public class LnurlPayClient implements AutoCloseable {
                     invoiceResponse.body(), LnurlPayInvoiceResponse.class);
 
             if (invoiceResult == null || invoiceResult.getPr() == null) {
-                throw new RuntimeException("Invalid LNURL-pay invoice response");
+                throw new LnurlException("Invalid LNURL-pay invoice response");
             }
 
             log.log(System.Logger.Level.INFO,
@@ -197,7 +202,7 @@ public class LnurlPayClient implements AutoCloseable {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("LNURL-pay request interrupted", e);
+            throw new LnurlException("LNURL-pay request interrupted", e);
         } catch (IllegalArgumentException e) {
             // Input validation failures always propagate — not swallowed by lenient mode
             throw e;
@@ -266,7 +271,7 @@ public class LnurlPayClient implements AutoCloseable {
                     "Returning mock invoice (fail-on-resolution-error=false): {0}", mockInvoice);
             return mockInvoice;
         } else {
-            throw new RuntimeException("Lightning address resolution failed: " + e.getMessage(), e);
+            throw new LnurlException("Lightning address resolution failed: " + e.getMessage(), e);
         }
     }
 

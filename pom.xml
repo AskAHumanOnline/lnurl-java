@@ -170,7 +170,7 @@
                     </executions>
                     <configuration>
                         <release>${java.version}</release>
-                        <failOnError>false</failOnError>
+                        <failOnError>true</failOnError>
                     </configuration>
                 </plugin>
             </plugins>
@@ -203,6 +203,30 @@
                             <publishingServerId>central</publishingServerId>
                             <autoPublish>false</autoPublish>
                         </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <!-- Run: mvn verify -Psecurity-check -->
+            <!-- Requires NVD API key or local cache on first run (downloads CVE database). -->
+            <id>security-check</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.owasp</groupId>
+                        <artifactId>dependency-check-maven</artifactId>
+                        <version>12.1.0</version>
+                        <configuration>
+                            <failBuildOnCVSS>7</failBuildOnCVSS>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>check</goal>
+                                </goals>
+                            </execution>
+                        </executions>
                     </plugin>
                 </plugins>
             </build>

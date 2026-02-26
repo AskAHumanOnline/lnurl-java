@@ -21,6 +21,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>This is a pure Java implementation with no Spring dependencies. For Spring Boot
  * auto-configuration (including scheduled cleanup), use the {@code lnurl-java-spring-boot-starter}.</p>
+ *
+ * <p><strong>Security provider:</strong> Registers BouncyCastle as a JVM-wide security provider
+ * on first class load (idempotent — safe to load in multi-classloader environments).</p>
  */
 public class LnurlAuthService {
 
@@ -87,6 +90,10 @@ public class LnurlAuthService {
      * - k1: 32-byte challenge (hex-encoded)
      * - sig: DER-encoded ECDSA signature (hex-encoded)
      * - key: 33-byte compressed secp256k1 public key (hex-encoded)
+     *
+     * <p><strong>Rate limiting:</strong> Callers should apply per-IP rate limiting; ECDSA
+     * verification is CPU-intensive and this method can be used to mount a CPU-exhaustion
+     * DoS without throttling.</p>
      *
      * @param k1  the challenge value (64 hex chars)
      * @param sig the hex-encoded DER signature
@@ -206,7 +213,8 @@ public class LnurlAuthService {
      * Check if a challenge has been authenticated (wallet responded).
      *
      * @param k1 the challenge value
-     * @return the linking key if authenticated, null otherwise
+     * @return the authenticated linking key (wallet compressed public key, hex), or {@code null}
+     *         if the challenge does not exist, has expired, or has not yet been authenticated
      */
     public String getAuthenticatedKey(String k1) {
         AuthChallenge challenge = challenges.get(k1);
@@ -253,7 +261,9 @@ public class LnurlAuthService {
      * Returns null if challenge doesn't exist, is expired, or is not yet authenticated.
      *
      * @param k1 the challenge value
-     * @return the linking key if the challenge was successfully consumed, null otherwise
+     * @return the linking key (wallet compressed public key, hex) if the challenge was
+     *         successfully consumed, or {@code null} if the challenge does not exist,
+     *         has expired, or has not yet been authenticated by a wallet signature
      */
     public String consumeAndGetKey(String k1) {
         var result = new AtomicReference<String>();

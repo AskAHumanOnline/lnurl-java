@@ -138,4 +138,87 @@ class Bech32UtilsTest {
         assertNotEquals(encodedLogin, encodedOther,
                 "Different tag values must produce different encodings");
     }
+
+    // =========================================================================
+    // decodeLnurl tests
+    // =========================================================================
+
+    /**
+     * Round-trip: decodeLnurl(encodeLnurl(url)) must return the original URL.
+     */
+    @Test
+    @DisplayName("decodeLnurl should round-trip back to the original URL")
+    void decodeLnurl_roundTrip_returnsOriginalUrl() {
+        String url = "https://service.com/api?q=3fc3645b439ce8e7f2553a69e5267081d96dcd340693afabe04be7b0ccd178df";
+        String encoded = Bech32Utils.encodeLnurl(url);
+        String decoded = Bech32Utils.decodeLnurl(encoded);
+        assertEquals(url, decoded);
+    }
+
+    /**
+     * Round-trip with a URL containing query params and fragment-like path segments.
+     */
+    @Test
+    @DisplayName("decodeLnurl should round-trip LNURL-auth callback URL")
+    void decodeLnurl_roundTrip_withAuthCallback() {
+        String url = "https://askahuman.online/api/auth/lnurl/callback?tag=login&k1=test123";
+        assertEquals(url, Bech32Utils.decodeLnurl(Bech32Utils.encodeLnurl(url)));
+    }
+
+    /**
+     * decodeLnurl must accept lowercase input (canonical form after lowercasing).
+     */
+    @Test
+    @DisplayName("decodeLnurl should accept lowercase LNURL input")
+    void decodeLnurl_acceptsLowercaseInput() {
+        String url = "https://example.com/auth?tag=login";
+        String encoded = Bech32Utils.encodeLnurl(url);
+        String lower = encoded.toLowerCase();
+        assertEquals(url, Bech32Utils.decodeLnurl(lower));
+    }
+
+    /**
+     * Known test vector from LUD-01 spec.
+     */
+    @Test
+    @DisplayName("decodeLnurl should decode known LUD-01 test vector")
+    void decodeLnurl_knownVector() {
+        var lnurl = "LNURL1DP68GURN8GHJ7UM9WFMXJCM99E3K7MF0V9CXJ0M385EKVCENXC6R2C35XVUKXEFCV5MKVV34X5EKZD3EV56NYD3HXQURZEPEXEJXXEPNXSCRVWFNV9NXZCN9XQ6XYEFHVGCXXCMYXYMNSERXFQ5FNS";
+        var expectedUrl = "https://service.com/api?q=3fc3645b439ce8e7f2553a69e5267081d96dcd340693afabe04be7b0ccd178df";
+        assertEquals(expectedUrl, Bech32Utils.decodeLnurl(lnurl));
+    }
+
+    @Test
+    @DisplayName("decodeLnurl should throw IllegalArgumentException for null input")
+    void decodeLnurl_withNull_throwsException() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Bech32Utils.decodeLnurl(null));
+    }
+
+    @Test
+    @DisplayName("decodeLnurl should throw IllegalArgumentException for empty input")
+    void decodeLnurl_withEmpty_throwsException() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Bech32Utils.decodeLnurl(""));
+    }
+
+    @Test
+    @DisplayName("decodeLnurl should throw IllegalArgumentException for non-LNURL input")
+    void decodeLnurl_withNonLnurlInput_throwsException() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Bech32Utils.decodeLnurl("bc1qexamplebitcoinaddress"));
+    }
+
+    @Test
+    @DisplayName("decodeLnurl should throw IllegalArgumentException for tampered checksum")
+    void decodeLnurl_withTamperedChecksum_throwsException() {
+        String url = "https://example.com/auth?tag=login&k1=abc";
+        String encoded = Bech32Utils.encodeLnurl(url);
+        // Flip the last character to corrupt the checksum
+        char last = encoded.charAt(encoded.length() - 1);
+        char flipped = (last == 'A') ? 'B' : 'A';
+        String tampered = encoded.substring(0, encoded.length() - 1) + flipped;
+        assertThrows(IllegalArgumentException.class,
+                () -> Bech32Utils.decodeLnurl(tampered));
+    }
 }

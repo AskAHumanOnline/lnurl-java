@@ -1,6 +1,7 @@
 package online.askahuman.lnurl;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 /**
  * Bech32 encoding utility for LNURL per LUD-01 specification.
@@ -15,6 +16,16 @@ public final class Bech32Utils {
     private static final String CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
     private static final int[] GENERATOR = {0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3};
     private static final String HRP = "lnurl";
+    private static final int[] CHARSET_REV = buildCharsetRev();
+
+    private static int[] buildCharsetRev() {
+        int[] rev = new int[128];
+        Arrays.fill(rev, -1);
+        for (int i = 0; i < CHARSET.length(); i++) {
+            rev[CHARSET.charAt(i)] = i;
+        }
+        return rev;
+    }
 
     private Bech32Utils() {}
 
@@ -54,6 +65,74 @@ public final class Bech32Utils {
         }
 
         return sb.toString().toUpperCase();
+    }
+
+    /**
+     * Decode a Bech32-encoded LNURL back to its original URL per LUD-01.
+     * Accepts both uppercase and lowercase input.
+     *
+     * @param lnurl the bech32-encoded LNURL string (e.g. "LNURL1DP68GURN8...")
+     * @return the decoded URL string (starts with {@code https://} or {@code http://})
+     * @throws IllegalArgumentException if the input is null, empty, does not start with
+     *                                  {@code lnurl1}, contains an invalid character,
+     *                                  has a bad checksum, or decodes to a non-HTTP URL
+     */
+    public static String decodeLnurl(String lnurl) {
+        if (lnurl == null || lnurl.isEmpty()) {
+            throw new IllegalArgumentException("LNURL must not be null or empty");
+        }
+        String lower = lnurl.toLowerCase();
+        if (!lower.startsWith("lnurl1")) {
+            throw new IllegalArgumentException(
+                    "Input is not a valid LNURL: must start with 'lnurl1'");
+        }
+
+        // Strip the "lnurl1" prefix (HRP "lnurl" + separator "1")
+        String dataChars = lower.substring(6);
+        if (dataChars.length() < 6) {
+            throw new IllegalArgumentException(
+                    "LNURL data is too short (no payload before checksum)");
+        }
+
+        // Map each character to its 5-bit value
+        byte[] all5bit = new byte[dataChars.length()];
+        for (int i = 0; i < dataChars.length(); i++) {
+            char c = dataChars.charAt(i);
+            if (c >= 128) {
+                throw new IllegalArgumentException(
+                        "LNURL contains non-ASCII character: '" + c + "'");
+            }
+            int val = CHARSET_REV[c];
+            if (val == -1) {
+                throw new IllegalArgumentException(
+                        "LNURL contains invalid bech32 character: '" + c + "'");
+            }
+            all5bit[i] = (byte) val;
+        }
+
+        // Verify checksum: polymod(hrp-expand + all5bit) must equal 1
+        byte[] expanded = hrpExpand(HRP);
+        byte[] checksumInput = new byte[expanded.length + all5bit.length];
+        System.arraycopy(expanded, 0, checksumInput, 0, expanded.length);
+        System.arraycopy(all5bit, 0, checksumInput, expanded.length, all5bit.length);
+        if (polymod(checksumInput) != 1L) {
+            throw new IllegalArgumentException(
+                    "LNURL checksum verification failed (corrupted or tampered input)");
+        }
+
+        // Strip the last 6 checksum characters to get the data payload
+        byte[] data5bit = Arrays.copyOf(all5bit, all5bit.length - 6);
+
+        // Convert from 5-bit groups back to 8-bit bytes
+        byte[] urlBytes = convertBits(data5bit, 5, 8, false);
+
+        String url = new String(urlBytes, StandardCharsets.UTF_8);
+        if (!url.startsWith("https://") && !url.startsWith("http://")) {
+            throw new IllegalArgumentException(
+                    "Decoded LNURL does not contain a valid HTTP(S) URL: " + url);
+        }
+
+        return url;
     }
 
     private static long polymod(byte[] values) {

@@ -7,7 +7,7 @@ server:
 
 lnurl:
   auth:
-    base-url: http://localhost:8090
+    base-url: http://localhost:8090  # WARNING: Change to https:// in production — http:// is for local development only
     challenge-expiry-seconds: 300
   pay:
     fail-on-resolution-error: false
