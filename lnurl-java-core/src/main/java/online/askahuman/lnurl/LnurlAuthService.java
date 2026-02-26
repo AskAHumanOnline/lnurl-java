@@ -111,7 +111,7 @@ public class LnurlAuthService {
         }
 
         // Validate input format
-        if (sig == null || sig.isEmpty() || sig.length() < 140 || sig.length() > 144 || key == null || key.length() != 66) {
+        if (sig == null || sig.isEmpty() || sig.length() < 134 || sig.length() > 146 || key == null || key.length() != 66) {
             log.log(System.Logger.Level.WARNING, "Invalid sig or key format for k1: {0}... (key must be 66 hex chars)", truncate(k1));
             return false;
         }

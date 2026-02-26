@@ -5,15 +5,18 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.Scheduled;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Spring Boot auto-configuration for {@link LnurlAuthService}.
  *
- * <p>Registers an {@link LnurlAuthService} bean and schedules periodic cleanup
- * of expired LNURL-auth challenges.</p>
+ * <p>Registers an {@link LnurlAuthService} bean and a dedicated single-thread
+ * {@link ScheduledExecutorService} for periodic cleanup of expired LNURL-auth
+ * challenges. Does <em>not</em> use {@code @EnableScheduling} to avoid
+ * application-wide side-effects in consumer projects.</p>
  */
 @AutoConfiguration
 @EnableConfigurationProperties(LnurlProperties.class)
@@ -25,18 +28,21 @@ public class LnurlAuthAutoConfiguration {
         return new LnurlAuthService(props.getAuth().getChallengeExpirySeconds());
     }
 
-    @Configuration
-    @EnableScheduling
-    static class LnurlAuthSchedulingConfig {
-        private final LnurlAuthService lnurlAuthService;
-
-        LnurlAuthSchedulingConfig(LnurlAuthService lnurlAuthService) {
-            this.lnurlAuthService = lnurlAuthService;
-        }
-
-        @Scheduled(fixedDelay = 60_000)
-        public void cleanupExpiredChallenges() {
-            lnurlAuthService.cleanupExpiredChallenges();
-        }
+    /**
+     * Dedicated single-thread scheduler for expired challenge cleanup.
+     * Does not use @EnableScheduling to avoid affecting the consumer application's
+     * task scheduler configuration.
+     */
+    @Bean(destroyMethod = "shutdown")
+    @ConditionalOnMissingBean(name = "lnurlAuthCleanupScheduler")
+    public ScheduledExecutorService lnurlAuthCleanupScheduler(LnurlAuthService lnurlAuthService) {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "lnurl-auth-cleanup");
+            t.setDaemon(true);
+            return t;
+        });
+        scheduler.scheduleWithFixedDelay(
+                lnurlAuthService::cleanupExpiredChallenges, 60, 60, TimeUnit.SECONDS);
+        return scheduler;
     }
 }

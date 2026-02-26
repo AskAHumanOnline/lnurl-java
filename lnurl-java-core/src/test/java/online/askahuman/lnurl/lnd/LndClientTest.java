@@ -287,4 +287,18 @@ class LndClientTest {
             assertFalse(client.isConnected(), "isConnected() should be false in mock mode");
         }
     }
+
+    @Test
+    @DisplayName("LndClient implements AutoCloseable")
+    void lndClient_implementsAutoCloseable() {
+        assertInstanceOf(AutoCloseable.class,
+                new LndClient("localhost", 8080, "dummy_macaroon"));
+    }
+
+    @Test
+    @DisplayName("LndClient.close() completes without error")
+    void lndClient_closeCompletesWithoutError() {
+        LndClient client = new LndClient("localhost", 8080, "dummy_macaroon");
+        assertDoesNotThrow(client::close);
+    }
 }

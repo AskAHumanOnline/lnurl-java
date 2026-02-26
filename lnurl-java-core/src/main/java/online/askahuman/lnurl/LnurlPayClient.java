@@ -26,7 +26,7 @@ import java.time.Duration;
  * <p>This is a pure Java implementation with no Spring dependencies.
  * Uses {@link java.net.http.HttpClient} for HTTP calls and Jackson for JSON parsing.</p>
  */
-public class LnurlPayClient {
+public class LnurlPayClient implements AutoCloseable {
 
     private static final System.Logger log = System.getLogger(LnurlPayClient.class.getName());
 
@@ -45,6 +45,7 @@ public class LnurlPayClient {
         this.httpClient = httpClient;
         this.failOnResolutionError = failOnResolutionError;
         this.objectMapper = new ObjectMapper();
+        this.objectMapper.deactivateDefaultTyping();
         log.log(System.Logger.Level.INFO,
                 "LnurlPayClient initialized (fail-on-resolution-error: {0})",
                 failOnResolutionError);
@@ -104,6 +105,8 @@ public class LnurlPayClient {
                 throw new IllegalArgumentException(
                         "Invalid Lightning address: domain contains illegal characters (bare domain required)");
             }
+            // H-02: Reject private/loopback/link-local IP literals as provider domain
+            validateNotPrivateIpLiteral(domain);
 
             // Step 2: Fetch LNURL-pay endpoint
             String lnurlEndpoint = "https://" + domain + "/.well-known/lnurlp/" + username;
@@ -153,6 +156,15 @@ public class LnurlPayClient {
             if (callbackUri.getScheme() == null || !callbackUri.getScheme().equals("https")) {
                 throw new RuntimeException("LNURL-pay callback URL must use HTTPS scheme");
             }
+            // H-01: Callback host must match (or be a subdomain of) the provider domain
+            String callbackHost = callbackUri.getHost();
+            if (!isAllowedCallbackDomain(callbackHost, domain)) {
+                throw new RuntimeException(
+                        "LNURL-pay callback host '" + callbackHost +
+                        "' does not match provider domain '" + domain + "'");
+            }
+            // H-02: Reject private/loopback/link-local IP literals in callback URL
+            validateNotPrivateIpLiteral(callbackHost);
 
             // Step 4: Request invoice — use & if callback already has query params (LUD-06 § 5)
             String separator = endpoint.getCallback().contains("?") ? "&" : "?";
@@ -191,6 +203,56 @@ public class LnurlPayClient {
             throw e;
         } catch (Exception e) {
             return handleResolutionError(lightningAddress, amountSats, e);
+        }
+    }
+
+    @Override
+    public void close() {
+        httpClient.close();
+    }
+
+    /** Returns true if {@code callbackHost} equals or is a subdomain of {@code providerDomain}. */
+    private static boolean isAllowedCallbackDomain(String callbackHost, String providerDomain) {
+        if (callbackHost == null || providerDomain == null) return false;
+        String h = callbackHost.toLowerCase();
+        String p = providerDomain.toLowerCase();
+        return h.equals(p) || h.endsWith("." + p);
+    }
+
+    /**
+     * Rejects IPv4 literals that fall in private, loopback, or link-local ranges (SSRF guard).
+     * Hostname strings (e.g. "example.com") pass through without DNS resolution.
+     */
+    private static void validateNotPrivateIpLiteral(String host) {
+        if (host == null) return;
+        // Check for IPv6 loopback (::1)
+        if (host.contains(":")) {
+            if ("::1".equals(host) || "0:0:0:0:0:0:0:1".equals(host)) {
+                throw new IllegalArgumentException(
+                        "LNURL-pay URL points to a private/reserved IP address: " + host);
+            }
+            return; // Other IPv6 addresses treated as public
+        }
+        // Check for IPv4 literal (four dotted decimal groups)
+        String[] parts = host.split("\\.", -1);
+        if (parts.length != 4) return;
+        try {
+            int[] o = new int[4];
+            for (int i = 0; i < 4; i++) {
+                o[i] = Integer.parseInt(parts[i]);
+                if (o[i] < 0 || o[i] > 255) return; // Not a valid IP literal
+            }
+            if (o[0] == 127                                         // 127.0.0.0/8 loopback
+                    || o[0] == 10                                   // 10.0.0.0/8 private
+                    || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)   // 172.16.0.0/12 private
+                    || (o[0] == 192 && o[1] == 168)                 // 192.168.0.0/16 private
+                    || (o[0] == 169 && o[1] == 254)                 // 169.254.0.0/16 link-local
+                    || o[0] == 0) {                                 // 0.0.0.0/8 reserved
+                throw new IllegalArgumentException(
+                        "LNURL-pay URL points to a private/reserved IP address: " + host);
+            }
+        } catch (NumberFormatException e) {
+            // Parts are not integers — not a valid IPv4 literal, treat as hostname
         }
     }
 

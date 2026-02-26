@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
  */
 public final class Bech32Utils {
 
+    private static final System.Logger log = System.getLogger(Bech32Utils.class.getName());
     private static final String CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
     private static final int[] GENERATOR = {0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3};
     private static final String HRP = "lnurl";
@@ -30,6 +31,13 @@ public final class Bech32Utils {
         }
         if (url.length() > 2000) {
             throw new IllegalArgumentException("URL length exceeds maximum of 2000 characters");
+        }
+        if (!url.startsWith("https://") && !url.startsWith("http://")) {
+            throw new IllegalArgumentException("LNURL URL must use https:// or http:// scheme");
+        }
+        if (url.startsWith("http://")) {
+            log.log(System.Logger.Level.WARNING,
+                    "Encoding non-HTTPS LNURL: HTTP URLs should only be used with .onion addresses");
         }
         byte[] urlBytes = url.getBytes(StandardCharsets.UTF_8);
         byte[] data5bit = convertBits(urlBytes, 8, 5, true);

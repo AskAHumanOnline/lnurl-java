@@ -280,6 +280,31 @@ class LnurlPayClientTest {
             assertTrue(ex.getMessage().contains("illegal characters"),
                 "Expected 'illegal characters' in message but got: " + ex.getMessage());
         }
+
+        @Test
+        @DisplayName("should reject loopback IP as provider domain — always throws (H-02)")
+        void shouldRejectLoopbackIpProviderDomain() {
+            // IllegalArgumentException propagates even in lenient mode
+            LnurlPayClient service = LnurlPayClient.create(false);
+
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> service.resolveLightningAddress("alice@127.0.0.1", 100));
+
+            assertTrue(ex.getMessage().contains("private/reserved"),
+                "Expected 'private/reserved' in message but got: " + ex.getMessage());
+        }
+
+        @Test
+        @DisplayName("should reject private-range IP as provider domain — always throws (H-02)")
+        void shouldRejectPrivateRangeIpProviderDomain() {
+            LnurlPayClient service = LnurlPayClient.create(false);
+
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> service.resolveLightningAddress("alice@192.168.1.1", 100));
+
+            assertTrue(ex.getMessage().contains("private/reserved"),
+                "Expected 'private/reserved' in message but got: " + ex.getMessage());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -348,6 +373,18 @@ class LnurlPayClientTest {
         }
 
         @Test
+        @DisplayName("callback host from a different domain is rejected (H-01 SSRF guard)")
+        void callbackFromDifferentDomain_throwsRuntimeException() throws Exception {
+            String endpointDifferentDomain =
+                    "{\"tag\":\"payRequest\",\"callback\":\"https://evil.com/pay\"," +
+                    "\"minSendable\":1000,\"maxSendable\":1000000000}";
+            LnurlPayClient client = clientWithOneResponse(endpointDifferentDomain);
+
+            assertThrows(RuntimeException.class,
+                    () -> client.resolveLightningAddress("alice@example.com", 1000));
+        }
+
+        @Test
         @DisplayName("callback with http:// scheme is rejected (SSRF guard)")
         void callbackWithHttpUrl_throwsRuntimeException() throws Exception {
             String endpointHttpCallback =
@@ -396,6 +433,20 @@ class LnurlPayClientTest {
         }
 
         @Test
+        @DisplayName("subdomain callback from same provider is accepted (H-01)")
+        void callbackFromSubdomain_succeeds() throws Exception {
+            // Provider is example.com; callback is on sub.example.com — allowed
+            String endpointSubdomain =
+                    "{\"tag\":\"payRequest\",\"callback\":\"https://sub.example.com/pay\"," +
+                    "\"minSendable\":1000,\"maxSendable\":1000000000}";
+            String invoiceJson = "{\"pr\":\"lnbc100n1subdomain_invoice\"}";
+            LnurlPayClient client = clientWithTwoResponses(endpointSubdomain, invoiceJson);
+
+            String invoice = client.resolveLightningAddress("alice@example.com", 1000);
+            assertEquals("lnbc100n1subdomain_invoice", invoice);
+        }
+
+        @Test
         @DisplayName("HTTP 500 from invoice endpoint throws RuntimeException")
         void invoiceEndpointReturns500_throwsRuntimeException() throws Exception {
             // Endpoint succeeds (200) but invoice request fails (500)
@@ -413,6 +464,24 @@ class LnurlPayClientTest {
                     () -> client.resolveLightningAddress("alice@example.com", 1000));
             assertTrue(ex.getMessage().contains("HTTP 500"),
                     "Exception message should include HTTP status code");
+        }
+    }
+
+    @Nested
+    @DisplayName("Lifecycle Management")
+    class LifecycleManagement {
+
+        @Test
+        @DisplayName("should implement AutoCloseable")
+        void shouldImplementAutoCloseable() {
+            assertInstanceOf(AutoCloseable.class, LnurlPayClient.create(false));
+        }
+
+        @Test
+        @DisplayName("close() should complete without error")
+        void closeShouldCompleteWithoutError() {
+            LnurlPayClient service = LnurlPayClient.create(false);
+            assertDoesNotThrow(service::close);
         }
     }
 }
