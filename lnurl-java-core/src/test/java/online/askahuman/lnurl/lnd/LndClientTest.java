@@ -4,49 +4,65 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 /**
- * Tests for LndClient mock mode fallback behavior.
+ * Tests for LndClient.
  *
- * LndClient gracefully degrades to mock mode when:
- * - Macaroon file doesn't exist (falls back to "dummy_macaroon_for_testing")
- * - TLS cert file doesn't exist (skips TLS configuration)
- * - LND REST API is unavailable (returns mock responses)
+ * <p>Non-strict mode (via package-private 4-arg constructor) is used for tests that verify
+ * mock-mode fallback behaviour when LND is unavailable.
  *
- * Mock invoice payment behavior:
+ * <p>The {@link LndClient#withMacaroonFile} factory runs in strict mode (throws on failure)
+ * and is tested separately.
+ *
+ * Mock invoice payment behaviour:
  * - Mock invoices use a cryptographically valid random preimage + SHA256(preimage) = paymentHash
  * - The preimage is retrievable via getMockPreimage(paymentHash) for L402 flow testing
  * - Invoices are considered "paid" after 5 seconds from creation (tracked via in-memory map)
  */
 class LndClientTest {
 
-    private static LndClient createMockModeClient() {
-        return LndClient.withMacaroonFile(
-            "localhost", 8180,
-            "/nonexistent/path/admin.macaroon",
-            "/nonexistent/path/tls.cert"
-        );
+    /** Creates a non-strict client whose HttpClient always throws IOException (simulates LND down). */
+    @SuppressWarnings("unchecked")
+    private static LndClient createMockModeClient() throws Exception {
+        HttpClient mockHttp = mock(HttpClient.class);
+        doThrow(new IOException("Connection refused")).when(mockHttp).send(any(HttpRequest.class), any());
+        return new LndClient("localhost", 8180, "dummy_macaroon", mockHttp);
     }
 
     @Test
-    void testInitialization_mockMode() {
+    void testInitialization_withMacaroonFile_throwsWhenMacaroonFileNotFound() {
+        assertThrows(IllegalStateException.class, () ->
+                LndClient.withMacaroonFile("localhost", 8180, "/nonexistent/admin.macaroon", ""),
+                "withMacaroonFile must throw when a non-empty macaroon path cannot be read");
+    }
+
+    @Test
+    void testInitialization_withMacaroonFile_throwsWhenTlsCertNotFound() {
+        // Macaroon path is empty (dev mode OK), but TLS cert path is configured and missing
+        assertThrows(IllegalStateException.class, () ->
+                LndClient.withMacaroonFile("localhost", 8180, "", "/nonexistent/tls.cert"),
+                "withMacaroonFile must throw when a non-empty TLS cert path cannot be loaded");
+    }
+
+    @Test
+    void testInitialization_withMacaroonFile_succeedsWithEmptyPaths() {
+        // Both paths empty → dev mode: dummy macaroon, no TLS pinning, no exception
         assertDoesNotThrow(() -> {
-            LndClient client = createMockModeClient();
+            LndClient client = LndClient.withMacaroonFile("localhost", 8180, "", "");
             assertNotNull(client);
-        });
+        }, "withMacaroonFile must not throw when both paths are empty (development mode)");
     }
 
     @Test
-    void testCreateInvoice_mockFallback_returnsValidCryptoHash() {
+    void testCreateInvoice_mockFallback_returnsValidCryptoHash() throws Exception {
         LndClient client = createMockModeClient();
 
         LndClient.CreateInvoiceResponse response = client.createInvoice(100L, "Test", 3600L);
@@ -65,7 +81,7 @@ class LndClientTest {
     }
 
     @Test
-    void testCreateInvoice_mockFallback_preimageIsRetrievable() {
+    void testCreateInvoice_mockFallback_preimageIsRetrievable() throws Exception {
         LndClient client = createMockModeClient();
 
         LndClient.CreateInvoiceResponse response = client.createInvoice(100L, "Test", 3600L);
@@ -77,7 +93,7 @@ class LndClientTest {
     }
 
     @Test
-    void testCreateInvoice_mockFallback_eachInvoiceIsUnique() {
+    void testCreateInvoice_mockFallback_eachInvoiceIsUnique() throws Exception {
         LndClient client = createMockModeClient();
 
         LndClient.CreateInvoiceResponse r1 = client.createInvoice(100L, "First", 3600L);
@@ -88,7 +104,7 @@ class LndClientTest {
     }
 
     @Test
-    void testIsInvoicePaid_notPaidImmediately() {
+    void testIsInvoicePaid_notPaidImmediately() throws Exception {
         LndClient client = createMockModeClient();
 
         LndClient.CreateInvoiceResponse response = client.createInvoice(100L, "Test", 3600L);
@@ -98,7 +114,7 @@ class LndClientTest {
     }
 
     @Test
-    void testIsInvoicePaid_unknownHash_returnsFalse() {
+    void testIsInvoicePaid_unknownHash_returnsFalse() throws Exception {
         LndClient client = createMockModeClient();
 
         // Hash not in the mock map (not created by this client instance) → false
@@ -107,7 +123,21 @@ class LndClientTest {
     }
 
     @Test
-    void testGetMockPreimage_unknownHash_returnsNull() {
+    void testIsInvoicePaid_rejectsInvalidPaymentHash() throws Exception {
+        LndClient client = createMockModeClient();
+
+        assertThrows(IllegalArgumentException.class, () -> client.isInvoicePaid("not-a-hash"),
+                "isInvoicePaid must throw for non-64-char or non-hex paymentHash");
+        assertThrows(IllegalArgumentException.class, () -> client.isInvoicePaid(null),
+                "isInvoicePaid must throw for null paymentHash");
+        // Path traversal attempt
+        assertThrows(IllegalArgumentException.class, () ->
+                client.isInvoicePaid("../v1/channels/transactions/" + "a".repeat(26)),
+                "isInvoicePaid must throw for path traversal paymentHash");
+    }
+
+    @Test
+    void testGetMockPreimage_unknownHash_returnsNull() throws Exception {
         LndClient client = createMockModeClient();
 
         assertNull(client.getMockPreimage("a".repeat(64)),
@@ -115,7 +145,7 @@ class LndClientTest {
     }
 
     @Test
-    void testGetInvoice_mockFallback_newInvoiceIsOpen() {
+    void testGetInvoice_mockFallback_newInvoiceIsOpen() throws Exception {
         LndClient client = createMockModeClient();
 
         LndClient.CreateInvoiceResponse response = client.createInvoice(100L, "Test", 3600L);
@@ -127,17 +157,28 @@ class LndClientTest {
     }
 
     @Test
-    void testGetInvoice_unknownHash_returnsOpen() {
+    void testGetInvoice_unknownHash_returnsOpen() throws Exception {
         LndClient client = createMockModeClient();
 
-        LndClient.Invoice invoice = client.getInvoice("unknownhash");
+        // Valid 64-char hex hash that was never created → OPEN
+        LndClient.Invoice invoice = client.getInvoice("a".repeat(64));
         assertNotNull(invoice);
         assertEquals("OPEN", invoice.state());
     }
 
     @Test
+    void testGetInvoice_rejectsInvalidPaymentHash() throws Exception {
+        LndClient client = createMockModeClient();
+
+        assertThrows(IllegalArgumentException.class, () -> client.getInvoice("unknownhash"),
+                "getInvoice must throw for a non-64-char paymentHash");
+        assertThrows(IllegalArgumentException.class, () -> client.getInvoice(null),
+                "getInvoice must throw for null paymentHash");
+    }
+
+    @Test
     @DisplayName("payInvoice falls back to mock when LND is unavailable")
-    void testPayInvoice_mockFallback() {
+    void testPayInvoice_mockFallback() throws Exception {
         LndClient client = createMockModeClient();
 
         LndClient.PayInvoiceResponse response = client.payInvoice("lnbc100u1test");
@@ -164,6 +205,8 @@ class LndClientTest {
             return new LndClient("localhost", 8080, "deadbeef", mockHttp);
         }
 
+        private static final String HASH_64 = "a".repeat(64);
+
         @Test
         @DisplayName("createInvoice with real LND response sets isConnected=true")
         void createInvoice_realResponse_parsesRHashAndPaymentRequest() throws Exception {
@@ -181,28 +224,28 @@ class LndClientTest {
         @Test
         @DisplayName("isInvoicePaid returns true when LND reports SETTLED")
         void isInvoicePaid_settledInvoice_returnsTrue() throws Exception {
-            LndClient client = clientWith("{\"r_hash\":\"abc\",\"state\":\"SETTLED\"}");
+            LndClient client = clientWith("{\"r_hash\":\"" + HASH_64 + "\",\"state\":\"SETTLED\"}");
 
-            assertTrue(client.isInvoicePaid("abc123"));
+            assertTrue(client.isInvoicePaid(HASH_64));
             assertTrue(client.isConnected());
         }
 
         @Test
         @DisplayName("isInvoicePaid returns false when LND reports OPEN")
         void isInvoicePaid_openInvoice_returnsFalse() throws Exception {
-            LndClient client = clientWith("{\"r_hash\":\"abc\",\"state\":\"OPEN\"}");
+            LndClient client = clientWith("{\"r_hash\":\"" + HASH_64 + "\",\"state\":\"OPEN\"}");
 
-            assertFalse(client.isInvoicePaid("abc123"));
+            assertFalse(client.isInvoicePaid(HASH_64));
         }
 
         @Test
         @DisplayName("getInvoice parses state and memo from real LND response")
         void getInvoice_realResponse_parsesFields() throws Exception {
             LndClient client = clientWith(
-                    "{\"memo\":\"test memo\",\"r_hash\":\"abc\",\"value\":\"100\",\"state\":\"SETTLED\"}"
+                    "{\"memo\":\"test memo\",\"r_hash\":\"" + HASH_64 + "\",\"value\":\"100\",\"state\":\"SETTLED\"}"
             );
 
-            LndClient.Invoice invoice = client.getInvoice("abc");
+            LndClient.Invoice invoice = client.getInvoice(HASH_64);
 
             assertEquals("SETTLED", invoice.state());
             assertEquals("test memo", invoice.memo());
@@ -223,23 +266,23 @@ class LndClientTest {
         }
 
         @Test
-        @DisplayName("payInvoice with FAILED status falls back to mock (outer catch swallows)")
+        @DisplayName("payInvoice with FAILED status falls back to mock (non-strict client)")
         void payInvoice_failedResponse_fallsBackToMock() throws Exception {
             // parsePaymentResult throws RuntimeException for FAILED status,
-            // but payInvoice's outer catch(Exception) swallows it and returns mock.
+            // but in non-strict mode (package-private constructor), payInvoice catches it and returns mock.
             String ndjson = "{\"result\":{\"payment_hash\":\"h\",\"status\":\"FAILED\"," +
                     "\"failure_reason\":\"FAILURE_REASON_NO_ROUTE\"}}";
             LndClient client = clientWith(ndjson);
 
             LndClient.PayInvoiceResponse resp = client.payInvoice("lnbc100n1test");
-            assertEquals("MOCK", resp.status(), "FAILED LND response should produce a MOCK fallback response");
+            assertEquals("MOCK", resp.status(), "FAILED LND response should produce a MOCK fallback response in non-strict mode");
         }
 
         @Test
         @DisplayName("isConnected returns false before any real LND call (mock mode)")
-        void isConnected_returnsFalse_beforeAnyRealCall() {
+        void isConnected_returnsFalse_beforeAnyRealCall() throws Exception {
             LndClient client = createMockModeClient();
-            // createMockModeClient triggers a mock-mode fallback on first use
+            // Triggers mock-mode fallback
             client.createInvoice(1L, "test", 60L);
             assertFalse(client.isConnected(), "isConnected() should be false in mock mode");
         }

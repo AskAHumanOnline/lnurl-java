@@ -30,9 +30,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * LND REST API client for Lightning Network operations.
  *
- * <p>Provides invoice creation, payment status checking, and invoice payment via the LND REST API.
- * Gracefully degrades to mock mode when LND is unavailable, making it suitable for both
- * production and development use.</p>
+ * <p>Provides invoice creation, payment status checking, and invoice payment via the LND REST API.</p>
+ *
+ * <p><strong>Strict mode (default):</strong> When LND is unavailable, methods throw {@link RuntimeException}
+ * instead of silently returning mock data. Use this in production to prevent fake invoices from
+ * being treated as real payments. The {@link #withMacaroonFile} factory and public constructors
+ * use strict mode by default.</p>
+ *
+ * <p><strong>Non-strict mode:</strong> Falls back to in-memory mock responses when LND is unreachable.
+ * Useful for integration testing without a running LND node. The package-private constructor
+ * (used for injecting a mock HttpClient in tests) uses non-strict mode.</p>
  *
  * <p>This is a pure Java implementation with no Spring dependencies.
  * Uses {@link java.net.http.HttpClient} for HTTP calls and Jackson for JSON parsing.</p>
@@ -58,68 +65,87 @@ public class LndClient {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, MockPaymentData> mockPayments = new ConcurrentHashMap<>();
     private final AtomicBoolean mockMode = new AtomicBoolean(false);
+    private final boolean strictMode;
 
     /**
-     * Create an LndClient with an already hex-encoded macaroon and a pre-built HttpClient.
-     * Package-private to allow test injection of a mock HttpClient.
+     * Package-private constructor for test injection of a mock HttpClient.
+     * Runs in <em>non-strict</em> mode: LND failures fall back to mock responses.
      *
      * @param host       LND host
      * @param restPort   LND REST port
      * @param macaroon   hex-encoded admin macaroon
-     * @param httpClient the HTTP client to use (should be configured with TLS if needed)
+     * @param httpClient the HTTP client to use (typically a Mockito mock in tests)
      */
     LndClient(String host, int restPort, String macaroon, HttpClient httpClient) {
+        this(host, restPort, macaroon, httpClient, false);
+    }
+
+    private LndClient(String host, int restPort, String macaroon, HttpClient httpClient, boolean strictMode) {
         this.baseUrl = "https://" + host + ":" + restPort;
         this.macaroon = macaroon;
         this.httpClient = httpClient;
+        this.strictMode = strictMode;
         log.log(System.Logger.Level.INFO, "LndClient initialized for {0}:{1}", host, String.valueOf(restPort));
     }
 
     /**
      * Create an LndClient with an already hex-encoded macaroon string.
-     * Uses a default HttpClient (no custom TLS).
+     * Uses a default HttpClient (no custom TLS) and runs in <em>strict</em> mode.
      *
      * @param host     LND host
      * @param restPort LND REST port
      * @param macaroon hex-encoded admin macaroon
      */
     public LndClient(String host, int restPort, String macaroon) {
-        this(host, restPort, macaroon, HttpClient.newHttpClient());
+        this(host, restPort, macaroon, HttpClient.newHttpClient(), true);
     }
 
     /**
-     * Factory method that reads the macaroon file, configures TLS from the cert file,
-     * and returns an LndClient. Falls back to a dummy macaroon if the file cannot be read.
+     * Factory method that reads the macaroon file, optionally configures TLS from the cert file,
+     * and returns an LndClient in <em>strict</em> mode.
+     *
+     * <p>Macaroon path behaviour:</p>
+     * <ul>
+     *   <li>Empty / blank: logs a warning and uses a dummy macaroon (development only).</li>
+     *   <li>Non-empty but unreadable: throws {@link IllegalStateException}.</li>
+     * </ul>
+     *
+     * <p>TLS cert path behaviour:</p>
+     * <ul>
+     *   <li>Empty / blank: TLS certificate pinning is skipped (system trust store used).</li>
+     *   <li>Non-empty but not found or unloadable: throws {@link IllegalStateException}.</li>
+     * </ul>
      *
      * @param host         LND host
      * @param restPort     LND REST port
-     * @param macaroonPath path to the LND admin macaroon file
-     * @param tlsCertPath  path to the LND TLS certificate file
-     * @return a configured LndClient instance
+     * @param macaroonPath path to the LND admin macaroon file (empty = dev mode)
+     * @param tlsCertPath  path to the LND TLS certificate file (empty = skip pinning)
+     * @return a configured LndClient instance in strict mode
+     * @throws IllegalStateException if a non-empty macaroon path cannot be read, or a non-empty
+     *                               TLS cert path cannot be loaded
      */
     public static LndClient withMacaroonFile(String host, int restPort, String macaroonPath, String tlsCertPath) {
-        // Try to read macaroon file, use dummy value if not available (for testing)
         String macaroonValue;
-        try {
+        if (macaroonPath == null || macaroonPath.isBlank()) {
+            macaroonValue = "dummy_macaroon_for_testing";
+            log.log(System.Logger.Level.WARNING,
+                    "LndClient: no macaroon path configured — using dummy macaroon (development only)");
+        } else {
+            // Throws IllegalStateException if the file cannot be read
             macaroonValue = readMacaroonAsHex(macaroonPath);
             log.log(System.Logger.Level.INFO,
                     "LndClient initialized with macaroon for {0}:{1}", host, String.valueOf(restPort));
-        } catch (Exception e) {
-            log.log(System.Logger.Level.WARNING,
-                    "Could not read LND macaroon file: {0}. Using dummy value for testing.", e.getMessage());
-            macaroonValue = "dummy_macaroon_for_testing";
         }
 
-        // Configure TLS cert if available
-        SSLContext sslContext = loadTlsCert(tlsCertPath);
         HttpClient.Builder builder = HttpClient.newBuilder();
-        if (sslContext != null) {
+        if (tlsCertPath != null && !tlsCertPath.isBlank()) {
+            // Throws IllegalStateException if the cert cannot be loaded
+            SSLContext sslContext = loadTlsCert(tlsCertPath);
             builder.sslContext(sslContext);
             log.log(System.Logger.Level.INFO, "LndClient configured with TLS cert from {0}", tlsCertPath);
         }
-        HttpClient httpClient = builder.build();
 
-        return new LndClient(host, restPort, macaroonValue, httpClient);
+        return new LndClient(host, restPort, macaroonValue, builder.build(), true);
     }
 
     /**
@@ -129,6 +155,7 @@ public class LndClient {
      * @param memo          invoice memo/description
      * @param expirySeconds invoice expiry time in seconds
      * @return the created invoice response
+     * @throws RuntimeException if LND is unavailable and strict mode is enabled
      */
     public CreateInvoiceResponse createInvoice(long amountSats, String memo, long expirySeconds) {
         try {
@@ -155,16 +182,19 @@ public class LndClient {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return createMockInvoice(amountSats, e);
+            throw new RuntimeException("LND request interrupted", e);
         } catch (Exception e) {
             return createMockInvoice(amountSats, e);
         }
     }
 
-    private CreateInvoiceResponse createMockInvoice(long amountSats, Exception e) {
+    private CreateInvoiceResponse createMockInvoice(long amountSats, Exception cause) {
+        if (strictMode) {
+            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+        }
         mockMode.set(true);
         log.log(System.Logger.Level.WARNING,
-                "LND not available, creating mock invoice for testing: {0}", e.getMessage());
+                "LND not available, creating mock invoice for testing: {0}", cause.getMessage());
         try {
             byte[] preimageBytes = new byte[32];
             new SecureRandom().nextBytes(preimageBytes);
@@ -191,10 +221,13 @@ public class LndClient {
     /**
      * Check if an invoice has been paid (settled).
      *
-     * @param paymentHash the payment hash to check
+     * @param paymentHash the payment hash to check (must be exactly 64 hex characters)
      * @return true if the invoice is settled
+     * @throws IllegalArgumentException if paymentHash is not exactly 64 hex characters
+     * @throws RuntimeException         if LND is unavailable and strict mode is enabled
      */
     public boolean isInvoicePaid(String paymentHash) {
+        validatePaymentHash(paymentHash);
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/v1/invoice/" + paymentHash))
@@ -213,16 +246,19 @@ public class LndClient {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return checkMockPayment(paymentHash, e);
+            throw new RuntimeException("LND request interrupted", e);
         } catch (Exception e) {
             return checkMockPayment(paymentHash, e);
         }
     }
 
-    private boolean checkMockPayment(String paymentHash, Exception e) {
+    private boolean checkMockPayment(String paymentHash, Exception cause) {
+        if (strictMode) {
+            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+        }
         mockMode.set(true);
         log.log(System.Logger.Level.WARNING,
-                "LND not available, returning mock payment status for testing: {0}", e.getMessage());
+                "LND not available, returning mock payment status for testing: {0}", cause.getMessage());
         MockPaymentData data = mockPayments.get(paymentHash);
         if (data != null) {
             return (System.currentTimeMillis() - data.createdTime()) > 5000;
@@ -252,10 +288,13 @@ public class LndClient {
     /**
      * Get invoice details from LND.
      *
-     * @param paymentHash the payment hash
+     * @param paymentHash the payment hash (must be exactly 64 hex characters)
      * @return the invoice details
+     * @throws IllegalArgumentException if paymentHash is not exactly 64 hex characters
+     * @throws RuntimeException         if LND is unavailable and strict mode is enabled
      */
     public Invoice getInvoice(String paymentHash) {
+        validatePaymentHash(paymentHash);
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/v1/invoice/" + paymentHash))
@@ -268,15 +307,18 @@ public class LndClient {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return createMockInvoiceDetails(paymentHash);
+            throw new RuntimeException("LND request interrupted", e);
         } catch (Exception e) {
-            log.log(System.Logger.Level.WARNING,
-                    "LND not available, returning mock invoice for testing: {0}", e.getMessage());
-            return createMockInvoiceDetails(paymentHash);
+            return createMockInvoiceDetails(paymentHash, e);
         }
     }
 
-    private Invoice createMockInvoiceDetails(String paymentHash) {
+    private Invoice createMockInvoiceDetails(String paymentHash, Exception cause) {
+        if (strictMode) {
+            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+        }
+        log.log(System.Logger.Level.WARNING,
+                "LND not available, returning mock invoice for testing: {0}", cause.getMessage());
         MockPaymentData data = mockPayments.get(paymentHash);
         boolean settled = data != null && (System.currentTimeMillis() - data.createdTime()) > 5000;
         return new Invoice(null, paymentHash, null, null, settled ? "SETTLED" : "OPEN", null);
@@ -298,6 +340,7 @@ public class LndClient {
      *
      * @param paymentRequest the BOLT11 invoice to pay
      * @return the payment response
+     * @throws RuntimeException if LND is unavailable and strict mode is enabled
      */
     public PayInvoiceResponse payInvoice(String paymentRequest) {
         try {
@@ -324,15 +367,18 @@ public class LndClient {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return createMockPayResponse();
+            throw new RuntimeException("LND request interrupted", e);
         } catch (Exception e) {
-            log.log(System.Logger.Level.WARNING,
-                    "LND not available or payment failed, using mock payment: {0}", e.getMessage());
-            return createMockPayResponse();
+            return createMockPayResponse(e);
         }
     }
 
-    private PayInvoiceResponse createMockPayResponse() {
+    private PayInvoiceResponse createMockPayResponse(Exception cause) {
+        if (strictMode) {
+            throw new RuntimeException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+        }
+        log.log(System.Logger.Level.WARNING,
+                "LND not available or payment failed, using mock payment: {0}", cause.getMessage());
         return new PayInvoiceResponse(
                 "mock_payout_hash_" + System.currentTimeMillis(),
                 "mock_preimage_" + System.currentTimeMillis(),
@@ -367,22 +413,45 @@ public class LndClient {
         );
     }
 
+    /**
+     * Validate that a payment hash is exactly 64 hex characters (SHA-256 output).
+     * Prevents path injection into LND REST API URIs.
+     *
+     * @throws IllegalArgumentException if the hash is null, wrong length, or not valid hex
+     */
+    private static void validatePaymentHash(String paymentHash) {
+        if (paymentHash == null || paymentHash.length() != 64) {
+            throw new IllegalArgumentException(
+                    "paymentHash must be exactly 64 hex characters, got: " + paymentHash);
+        }
+        try {
+            HexFormat.of().parseHex(paymentHash);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                    "paymentHash must be valid hex: " + paymentHash, e);
+        }
+    }
+
     private static String readMacaroonAsHex(String path) {
         try {
             byte[] macaroonBytes = Files.readAllBytes(Paths.get(path));
             return bytesToHex(macaroonBytes);
         } catch (IOException e) {
-            throw new RuntimeException("Could not read Lightning macaroon from: " + path, e);
+            throw new IllegalStateException("Cannot read LND macaroon from: " + path, e);
         }
     }
 
+    /**
+     * Load a TLS certificate for certificate pinning against the LND node.
+     * Called only when {@code tlsCertPath} is non-empty.
+     *
+     * @throws IllegalStateException if the certificate file is not found or cannot be parsed
+     */
     private static SSLContext loadTlsCert(String tlsCertPath) {
         try {
             Path certPath = Paths.get(tlsCertPath);
             if (!Files.exists(certPath)) {
-                log.log(System.Logger.Level.WARNING,
-                        "LND TLS cert not found at {0}. Skipping TLS configuration.", tlsCertPath);
-                return null;
+                throw new IllegalStateException("LND TLS cert not found at: " + tlsCertPath);
             }
             byte[] certBytes = Files.readAllBytes(certPath);
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
@@ -398,10 +467,10 @@ public class LndClient {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, tmf.getTrustManagers(), null);
             return sslContext;
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
-            log.log(System.Logger.Level.WARNING,
-                    "Could not load LND TLS cert: {0}. Skipping TLS configuration.", e.getMessage());
-            return null;
+            throw new IllegalStateException("Could not load LND TLS cert from: " + tlsCertPath, e);
         }
     }
 
