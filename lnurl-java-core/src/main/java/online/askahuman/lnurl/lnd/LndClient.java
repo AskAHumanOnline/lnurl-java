@@ -23,6 +23,7 @@ import java.security.SecureRandom;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -186,7 +187,12 @@ public class LndClient implements AutoCloseable {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            CreateInvoiceResponse result = objectMapper.readValue(response.body(), CreateInvoiceResponse.class);
+            CreateInvoiceResponse raw = objectMapper.readValue(response.body(), CreateInvoiceResponse.class);
+
+            // LND REST API returns r_hash as standard base64 (protobuf bytes marshaling).
+            // Convert to hex so callers can use it directly in /v1/invoice/{r_hash} lookups.
+            String rHashHex = bytesToHex(Base64.getDecoder().decode(raw.rHash()));
+            CreateInvoiceResponse result = new CreateInvoiceResponse(rHashHex, raw.paymentRequest(), raw.addIndex());
 
             mockMode.set(false);
             log.log(System.Logger.Level.INFO, "Created invoice: {0} sats, hash: {1}",
