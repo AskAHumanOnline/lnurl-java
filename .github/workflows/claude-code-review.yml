@@ -1,33 +1,10 @@
-name: Claude Code Review
+name: Security Review
 
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
 
 jobs:
-  claude-review:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude Code Review
-        id: claude-review
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-
   security-scan:
     runs-on: ubuntu-latest
     permissions:
@@ -42,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Security Scan
+      - name: Run Security Review
         id: security-scan
         uses: anthropics/claude-code-action@v1
         with:
@@ -53,88 +30,116 @@ jobs:
             **PR:** ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
             **Branch:** `${{ github.head_ref }}` → `${{ github.base_ref }}`
 
-            ## What to Review
+            ## How to Review
 
-            Fetch and analyse only the files changed in this PR. Focus exclusively on the diff — do not audit the entire codebase.
+            1. Use `gh pr diff ${{ github.event.pull_request.number }}` to get the full diff.
+            2. Use `gh pr view ${{ github.event.pull_request.number }} --json files` to list changed files.
+            3. For every changed file, **read the full file** — not just the diff lines. Security issues often arise from the interaction between new code and existing context.
+            4. When a changed file touches signature verification or challenge handling, also read `LnurlAuthService.java` and `Bech32Utils.java` to verify the integration is correct.
+            5. When a changed file touches the HTTP client or LND integration, also read `LndClient.java` in full to verify TLS, macaroon handling, and error paths.
+            6. When a changed file touches LNURL-pay, also read `LnurlPayService.java` to verify callback URL validation and amount range enforcement.
 
-            Run these checks on every changed file:
+            ## Checks to Run on Every Changed File
 
             ### 1. OWASP Top 10
-            - Injection (command, expression language)
-            - Sensitive data exposure (secrets, keys, challenge bytes in logs or responses)
-            - XXE in XML parsing
+            - Injection: command injection in path handling; EL/SpEL injection
+            - Sensitive data exposure: macaroon bytes, k1 challenge bytes, preimages, or TLS material in logs (any level, including DEBUG/TRACE) or exception messages
+            - XXE in any XML parsing paths
             - Insecure deserialization of untrusted data
-            - Vulnerable/outdated dependency versions
+            - SSRF via unvalidated or caller-controlled URLs (LNURL callbacks, LND REST base URL)
+            - Vulnerable/outdated dependency versions in `pom.xml` changes
 
             ### 2. Library API Surface
-            - Unintentionally public classes or methods that expose internal state
-            - Mutable objects returned from public API (defensive copy missing)
-            - Missing `@NonNull` / null guards on public API boundaries
-            - Checked vs unchecked exception contracts (should library callers be forced to handle?)
+            - Unintentionally public classes or methods that expose internal cryptographic state
+            - Mutable objects returned from public API without defensive copy
+            - Missing null guards on public API boundaries (library callers may pass null)
+            - Checked vs unchecked exception contracts — library callers should be forced to handle protocol violations
+            - New public methods that could be misused or combined insecurely by downstream consumers
 
             ### 3. LNURL Protocol Security (LUD-01, LUD-04, LUD-06)
-            - **Bech32**: encoding/decoding edge cases — invalid checksums accepted, wrong HRP tolerated
-            - **LNURL-auth (LUD-04)**: secp256k1 signature verification correctness; wrong algorithm used (must be `NONEwithECDSA`, NOT `SHA256withECDSA` which double-hashes k1); replay protection
-            - **LNURL-pay (LUD-06)**: amount range validation (min/max sats respected); unvalidated callback URL (open redirect, SSRF); missing HTTPS enforcement on callback
-            - **k1 challenge entropy**: insufficient randomness in challenge generation (must be cryptographically secure 32 bytes)
-            - **Timing attacks** in signature comparison or challenge lookup
+            - **Bech32**: invalid checksums accepted; wrong HRP tolerated; decoding of truncated or oversized input
+            - **LNURL-auth (LUD-04)**: secp256k1 signature verification correctness; algorithm must be `NONEwithECDSA` (NOT `SHA256withECDSA`, which double-hashes k1 and breaks all verifications); replay protection
+            - **LNURL-pay (LUD-06)**: amount range validation (minSendable / maxSendable respected); unvalidated callback URL (SSRF, open redirect); missing HTTPS enforcement on callback domains
+            - **k1 challenge entropy**: must be cryptographically secure 32 random bytes; weak PRNG unacceptable
+            - **Timing attacks** in signature comparison or challenge lookup — use constant-time comparison
 
             ### 4. HTTP Client Security (LND REST Client)
-            - SSRF via unvalidated or caller-controlled base URLs
-            - TLS certificate validation disabled or skipped
-            - Macaroon hex bytes logged at any level
-            - Missing connection / read timeouts (DoS via slow responses)
-            - Sensitive headers included in error messages or logs
+            - SSRF via unvalidated or caller-controlled base URL or path segments
+            - TLS certificate validation disabled or bypassed (custom `TrustManager` accepting all certs)
+            - Macaroon hex bytes or TLS material logged at any level
+            - Missing connection or read timeouts (DoS via slow LND responses)
+            - Sensitive request headers (Authorization, Grpc-Metadata-Macaroon) included in error messages or logs
+            - Path traversal via user-supplied payment hash used to build REST URL (`/v1/invoices/{hash}`)
 
-            ### 5. Input Validation & Data Integrity
-            - Missing null / empty checks on Lightning address components (user, domain)
-            - Integer overflow in millisat/sat arithmetic (use `long`, not `int`)
-            - Missing validation of LNURL response fields (null callback, missing minSendable)
-            - Path traversal via user-supplied macaroon or cert file paths
+            ### 5. Spring Boot Auto-Configuration Security
+            - Default `SecurityFilterChain` too permissive (`anyRequest().permitAll()`)
+            - Auto-configured beans exposing sensitive config values (macaroon path, TLS cert path) via Actuator
+            - Missing `@ConditionalOnMissingBean` allowing consumer configuration to be silently overridden
+            - Macaroon secret or TLS defaults that are weak or hardcoded in auto-configuration classes
+            - Configuration properties bound to user-controlled input without validation (`@Validated` missing)
 
-            ### 6. Secrets & Credentials
-            - Hardcoded macaroon bytes, TLS certificates, or API keys in source code
-            - Secrets logged at any level (DEBUG included)
-            - Unsafe default values for security-critical config
+            ### 6. Input Validation & Data Integrity
+            - Missing null or empty checks on Lightning address components (username, domain)
+            - Integer overflow in millisat/sat arithmetic — use `long`, not `int`
+            - Missing validation of LNURL response fields (null callback URL, missing minSendable/maxSendable)
+            - Path traversal via user-supplied macaroon file path or TLS cert path
+            - Payment hash format not validated before use in HTTP path construction (must be 64-char hex)
 
-            ### 7. Race Conditions & Concurrency
-            - Non-atomic check-then-act on shared challenge stores
-            - Missing synchronisation on mutable shared state in auto-configured beans
+            ### 7. Secrets & Credentials
+            - Hardcoded macaroon bytes, TLS certificates, challenge secrets, or API keys in source code
+            - Secrets logged at any level (DEBUG and TRACE included)
+            - Unsafe default values for security-critical configuration properties
+            - New `application*.yml` or `.properties` test fixtures that contain real-looking credentials
+
+            ### 8. Race Conditions & Concurrency
+            - Non-atomic check-then-act on shared challenge stores (`ConcurrentHashMap` operations that should be atomic)
+            - Missing synchronisation on mutable shared state in auto-configured singleton beans
+            - Mock payment timing map: race between `createInvoice` recording and `isInvoicePaid` reading
 
             ## Severity Scale
 
             | Severity | Criteria |
             |----------|----------|
-            | CRITICAL | Exploitable without auth; funds at risk or signature bypass |
+            | CRITICAL | Exploitable without auth; funds at risk, signature bypass, or k1 forgery |
             | HIGH     | Exploitable under specific conditions; protocol correctness broken |
-            | MEDIUM   | Defence-in-depth weakness; indirect risk |
-            | LOW      | Best-practice deviation; low impact |
-            | INFO     | Observation; no direct security impact |
+            | MEDIUM   | Defence-in-depth weakness; indirect or chained risk |
+            | LOW      | Best-practice deviation; negligible direct impact |
+            | INFO     | Observation or hardening suggestion; no direct security impact |
 
             ## Output Format
 
-            Post your findings as a PR comment with this structure:
+            Post your findings as a PR comment using this exact structure:
 
             ```
-            ## Security Scan Results
+            ## Security Review
 
             ### Summary
-            <one-paragraph executive summary>
+            <One paragraph: what this PR does, overall risk assessment, any patterns of concern.>
 
             ### Findings
 
             #### [SEVERITY] Short Title
             **File:** `path/to/File.java:line`
-            **Description:** What the vulnerability is and why it matters.
-            **Recommendation:** Specific fix with code example if helpful.
+            **Description:** What the vulnerability is, why it matters, and how it could be exploited.
+            **Recommendation:** Specific fix with a concise code example where helpful.
 
             ---
+
+            ### Verdict
+            APPROVED | CHANGES REQUESTED
             ```
 
-            If no issues are found, post:
+            If there are no findings:
             ```
-            ## Security Scan Results
-            No security issues found in this PR. ✅
+            ## Security Review
+
+            ### Summary
+            <Brief description of what was reviewed.>
+
+            No security issues found. ✅
+
+            ### Verdict
+            APPROVED
             ```
 
-            Always post the comment even when there are no findings.
+            Always post the comment — even when there are no findings.
