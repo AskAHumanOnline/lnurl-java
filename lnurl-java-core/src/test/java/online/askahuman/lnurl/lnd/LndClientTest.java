@@ -205,18 +205,24 @@ class LndClientTest {
             return new LndClient("localhost", 8080, "deadbeef", mockHttp);
         }
 
+        // LND REST returns r_hash as standard base64 (protobuf bytes marshaling).
+        // createInvoice converts base64 → hex so callers can use it in /v1/invoice/{hash} lookups.
+        // 32 zero bytes: base64 = 43×'A' + '=',  hex = 64×'0'
+        private static final String ZERO_RHASH_BASE64 = "A".repeat(43) + "=";
+        private static final String ZERO_RHASH_HEX    = "0".repeat(64);
+
         private static final String HASH_64 = "a".repeat(64);
 
         @Test
-        @DisplayName("createInvoice with real LND response sets isConnected=true")
+        @DisplayName("createInvoice converts LND base64 r_hash to hex")
         void createInvoice_realResponse_parsesRHashAndPaymentRequest() throws Exception {
             LndClient client = clientWith(
-                    "{\"r_hash\":\"abc123\",\"payment_request\":\"lnbc100n1test\",\"add_index\":\"1\"}"
+                    "{\"r_hash\":\"" + ZERO_RHASH_BASE64 + "\",\"payment_request\":\"lnbc100n1test\",\"add_index\":\"1\"}"
             );
 
             LndClient.CreateInvoiceResponse resp = client.createInvoice(100L, "Memo", 3600L);
 
-            assertEquals("abc123", resp.rHash());
+            assertEquals(ZERO_RHASH_HEX, resp.rHash(), "r_hash must be hex-encoded after base64 decode");
             assertEquals("lnbc100n1test", resp.paymentRequest());
             assertTrue(client.isConnected(), "isConnected() must return true after a real LND call");
         }
