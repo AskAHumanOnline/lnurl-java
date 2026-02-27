@@ -148,7 +148,10 @@ public class LndClient implements AutoCloseable {
             log.log(System.Logger.Level.INFO, "LndClient configured with TLS cert from {0}", tlsCertPath);
         }
 
-        return new LndClient(host, restPort, macaroonValue, builder.build(), true);
+        // Strict mode only when a real macaroon file is configured.
+        // Blank macaroon path = development mode: fall back to mock responses instead of throwing.
+        boolean strict = (macaroonPath != null && !macaroonPath.isBlank());
+        return new LndClient(host, restPort, macaroonValue, builder.build(), strict);
     }
 
     @Override

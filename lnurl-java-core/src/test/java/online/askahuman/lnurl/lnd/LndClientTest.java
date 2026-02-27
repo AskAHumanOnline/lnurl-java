@@ -19,8 +19,8 @@ import static org.mockito.Mockito.*;
  * <p>Non-strict mode (via package-private 4-arg constructor) is used for tests that verify
  * mock-mode fallback behaviour when LND is unavailable.
  *
- * <p>The {@link LndClient#withMacaroonFile} factory runs in strict mode (throws on failure)
- * and is tested separately.
+ * <p>The {@link LndClient#withMacaroonFile} factory runs in strict mode when a real macaroon
+ * path is provided, and non-strict mode (mock fallback) when the macaroon path is blank.
  *
  * Mock invoice payment behaviour:
  * - Mock invoices use a cryptographically valid random preimage + SHA256(preimage) = paymentHash
@@ -59,6 +59,20 @@ class LndClientTest {
             LndClient client = LndClient.withMacaroonFile("localhost", 8180, "", "");
             assertNotNull(client);
         }, "withMacaroonFile must not throw when both paths are empty (development mode)");
+    }
+
+    @Test
+    @DisplayName("withMacaroonFile with blank macaroon path uses non-strict mode: falls back to mock on LND unavailable")
+    void testWithMacaroonFile_blankMacaroonPath_usesNonStrictMode() {
+        // Client created via withMacaroonFile with blank path → non-strict mode.
+        // With no real LND on port 8180, createInvoice must return a mock invoice instead of throwing.
+        LndClient client = LndClient.withMacaroonFile("localhost", 8180, "", "");
+        LndClient.CreateInvoiceResponse response = assertDoesNotThrow(
+                () -> client.createInvoice(1000L, "Activation fee", 86400L),
+                "withMacaroonFile with blank macaroon path must fall back to mock instead of throwing");
+        assertNotNull(response.rHash());
+        assertEquals(64, response.rHash().length(), "Mock payment hash must be 64-char hex");
+        assertNotNull(response.paymentRequest());
     }
 
     @Test
