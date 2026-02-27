@@ -285,6 +285,21 @@ class LndClientTest {
         }
 
         @Test
+        @DisplayName("getInfo parses alias, blockHeight and syncedToChain from real LND response")
+        void getInfo_realResponse_parsesFields() throws Exception {
+            LndClient client = clientWith(
+                    "{\"alias\":\"alice\",\"block_height\":840000,\"synced_to_chain\":true}"
+            );
+
+            LndClient.NodeInfo info = client.getInfo();
+
+            assertEquals("alice", info.alias());
+            assertEquals(840000, info.blockHeight());
+            assertTrue(info.syncedToChain());
+            assertTrue(client.isConnected(), "isConnected() must be true after a real LND call");
+        }
+
+        @Test
         @DisplayName("isConnected returns false before any real LND call (mock mode)")
         void isConnected_returnsFalse_beforeAnyRealCall() throws Exception {
             LndClient client = createMockModeClient();
@@ -292,6 +307,20 @@ class LndClientTest {
             client.createInvoice(1L, "test", 60L);
             assertFalse(client.isConnected(), "isConnected() should be false in mock mode");
         }
+    }
+
+    @Test
+    @DisplayName("getInfo falls back to mock when LND is unavailable")
+    void testGetInfo_mockFallback_returnsMockNode() throws Exception {
+        LndClient client = createMockModeClient();
+
+        LndClient.NodeInfo info = client.getInfo();
+
+        assertNotNull(info);
+        assertEquals("mock", info.alias(), "Mock node alias must be 'mock'");
+        assertEquals(0, info.blockHeight(), "Mock block height must be 0");
+        assertFalse(info.syncedToChain(), "Mock node must not report synced_to_chain=true");
+        assertFalse(client.isConnected(), "isConnected() must be false after mock fallback");
     }
 
     @Test

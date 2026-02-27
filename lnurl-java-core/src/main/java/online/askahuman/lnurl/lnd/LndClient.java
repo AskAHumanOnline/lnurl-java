@@ -347,6 +347,47 @@ public class LndClient implements AutoCloseable {
     }
 
     /**
+     * Retrieve basic node information from LND (/v1/getinfo).
+     *
+     * <p>This is a read-only probe — it does not create any state in LND.
+     * Prefer this over {@link #createInvoice} for health-check purposes.</p>
+     *
+     * @return node information
+     * @throws LnurlException if LND is unavailable and strict mode is enabled
+     */
+    public NodeInfo getInfo() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/v1/getinfo"))
+                    .header("Grpc-Metadata-macaroon", macaroon)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            NodeInfo info = objectMapper.readValue(response.body(), NodeInfo.class);
+
+            mockMode.set(false);
+            return info;
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new LnurlException("LND request interrupted", e);
+        } catch (Exception e) {
+            return createMockNodeInfo(e);
+        }
+    }
+
+    private NodeInfo createMockNodeInfo(Exception cause) {
+        if (strictMode) {
+            throw new LnurlException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
+        }
+        mockMode.set(true);
+        log.log(System.Logger.Level.WARNING,
+                "LND not available, returning mock node info: {0}", cause.getMessage());
+        return new NodeInfo("mock", 0, false);
+    }
+
+    /**
      * Pay a Lightning invoice via LND SendPaymentV2 (/v2/router/send).
      *
      * <p>Uses the recommended V2 router API instead of the deprecated
@@ -548,5 +589,19 @@ public class LndClient implements AutoCloseable {
             @JsonProperty("payment_hash") String paymentHash,
             @JsonProperty("payment_preimage") String paymentPreimage,
             String status
+    ) {}
+
+    /**
+     * Basic node information from LND (/v1/getinfo).
+     *
+     * @param alias          human-readable node alias
+     * @param blockHeight    current best block height seen by LND
+     * @param syncedToChain  whether LND is fully synced to the chain
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record NodeInfo(
+            String alias,
+            @JsonProperty("block_height") int blockHeight,
+            @JsonProperty("synced_to_chain") boolean syncedToChain
     ) {}
 }
