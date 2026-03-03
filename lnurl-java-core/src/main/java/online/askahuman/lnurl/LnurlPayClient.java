@@ -70,6 +70,30 @@ public class LnurlPayClient implements AutoCloseable {
     }
 
     /**
+     * Probe a Lightning address via LNURL-pay discovery (LUD-06 §1–2).
+     * Runs only the endpoint-fetch step — no invoice is requested and no amount is needed.
+     * Always throws on failure regardless of the {@code failOnResolutionError} flag, because
+     * returning a mock success when the address is unreachable would defeat the purpose of probing.
+     *
+     * @param lightningAddress Lightning address in format "username@domain.com"
+     * @return the parsed {@link LnurlPayEndpoint} from the provider
+     * @throws IllegalArgumentException if the address format is invalid or SSRF-guard rejects it
+     * @throws LnurlException           if the provider is unreachable or returns an invalid response
+     */
+    public LnurlPayEndpoint probeDiscovery(String lightningAddress) {
+        try {
+            return fetchEndpoint(lightningAddress);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new LnurlException("LNURL-pay probe interrupted", e);
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LnurlException("Lightning address probe failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * Resolve a Lightning address to a BOLT11 invoice using the LNURL-pay protocol.
      *
      * @param lightningAddress Lightning address in format "username@domain.com"
@@ -90,58 +114,8 @@ public class LnurlPayClient implements AutoCloseable {
             log.log(System.Logger.Level.DEBUG,
                     "Resolving Lightning address: {0} for {1} sats", lightningAddress, amountSats);
 
-            // Step 1: Parse Lightning address
-            String[] parts = lightningAddress.split("@");
-            if (parts.length != 2) {
-                throw new IllegalArgumentException(
-                        "Invalid Lightning address format: must be username@domain.com");
-            }
-            String username = parts[0];
-            String domain = parts[1];
-
-            // Validate username and domain to prevent SSRF (LUD-06 § 1)
-            if (username.isEmpty() || username.contains("/") || username.contains("?")
-                    || username.contains("#") || username.contains("@")) {
-                throw new IllegalArgumentException(
-                        "Invalid Lightning address: username contains illegal characters");
-            }
-            if (domain.isEmpty() || domain.contains("/") || domain.contains("?")
-                    || domain.contains("#") || domain.contains(":")) {
-                throw new IllegalArgumentException(
-                        "Invalid Lightning address: domain contains illegal characters (bare domain required)");
-            }
-            // H-02: Reject private/loopback/link-local IP literals as provider domain
-            validateNotPrivateIpLiteral(domain);
-
-            // Step 2: Fetch LNURL-pay endpoint
-            String lnurlEndpoint = "https://" + domain + "/.well-known/lnurlp/" + username;
-            log.log(System.Logger.Level.DEBUG, "Fetching LNURL endpoint: {0}", lnurlEndpoint);
-
-            HttpRequest endpointRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(lnurlEndpoint))
-                    .timeout(Duration.ofSeconds(10))
-                    .GET()
-                    .build();
-            HttpResponse<String> endpointResponse = httpClient.send(
-                    endpointRequest, HttpResponse.BodyHandlers.ofString());
-
-            if (endpointResponse.statusCode() != 200) {
-                throw new LnurlException(
-                        "LNURL-pay endpoint returned HTTP " + endpointResponse.statusCode());
-            }
-
-            LnurlPayEndpoint endpoint = objectMapper.readValue(
-                    endpointResponse.body(), LnurlPayEndpoint.class);
-
-            if (endpoint == null || endpoint.getCallback() == null) {
-                throw new LnurlException("Invalid LNURL-pay endpoint response");
-            }
-
-            // Validate tag
-            if (!"payRequest".equals(endpoint.getTag())) {
-                throw new LnurlException(
-                        "Invalid LNURL-pay tag: expected 'payRequest', got '" + endpoint.getTag() + "'");
-            }
+            LnurlPayEndpoint endpoint = fetchEndpoint(lightningAddress);
+            String domain = lightningAddress.split("@", 2)[1]; // safe: fetchEndpoint already validated format
 
             // Step 3: Validate amount against provider limits
             long amountMillisats = amountSats * 1000L;
@@ -214,6 +188,69 @@ public class LnurlPayClient implements AutoCloseable {
     @Override
     public void close() {
         httpClient.close();
+    }
+
+    /**
+     * Fetch and validate the LNURL-pay endpoint (LUD-06 §1–2).
+     * Parses the Lightning address, enforces SSRF guards, performs the HTTP GET, and validates the
+     * JSON response tag. Does not validate amounts or fetch an invoice.
+     */
+    private LnurlPayEndpoint fetchEndpoint(String lightningAddress)
+            throws IOException, InterruptedException {
+        // Step 1: Parse Lightning address
+        String[] parts = lightningAddress.split("@");
+        if (parts.length != 2) {
+            throw new IllegalArgumentException(
+                    "Invalid Lightning address format: must be username@domain.com");
+        }
+        String username = parts[0];
+        String domain = parts[1];
+
+        // Validate username and domain to prevent SSRF (LUD-06 § 1)
+        if (username.isEmpty() || username.contains("/") || username.contains("?")
+                || username.contains("#") || username.contains("@")) {
+            throw new IllegalArgumentException(
+                    "Invalid Lightning address: username contains illegal characters");
+        }
+        if (domain.isEmpty() || domain.contains("/") || domain.contains("?")
+                || domain.contains("#") || domain.contains(":")) {
+            throw new IllegalArgumentException(
+                    "Invalid Lightning address: domain contains illegal characters (bare domain required)");
+        }
+        // H-02: Reject private/loopback/link-local IP literals as provider domain
+        validateNotPrivateIpLiteral(domain);
+
+        // Step 2: Fetch LNURL-pay endpoint
+        String lnurlEndpoint = "https://" + domain + "/.well-known/lnurlp/" + username;
+        log.log(System.Logger.Level.DEBUG, "Fetching LNURL endpoint: {0}", lnurlEndpoint);
+
+        HttpRequest endpointRequest = HttpRequest.newBuilder()
+                .uri(URI.create(lnurlEndpoint))
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+        HttpResponse<String> endpointResponse = httpClient.send(
+                endpointRequest, HttpResponse.BodyHandlers.ofString());
+
+        if (endpointResponse.statusCode() != 200) {
+            throw new LnurlException(
+                    "LNURL-pay endpoint returned HTTP " + endpointResponse.statusCode());
+        }
+
+        LnurlPayEndpoint endpoint = objectMapper.readValue(
+                endpointResponse.body(), LnurlPayEndpoint.class);
+
+        if (endpoint == null || endpoint.getCallback() == null) {
+            throw new LnurlException("Invalid LNURL-pay endpoint response");
+        }
+
+        // Validate tag
+        if (!"payRequest".equals(endpoint.getTag())) {
+            throw new LnurlException(
+                    "Invalid LNURL-pay tag: expected 'payRequest', got '" + endpoint.getTag() + "'");
+        }
+
+        return endpoint;
     }
 
     /** Returns true if {@code callbackHost} equals or is a subdomain of {@code providerDomain}. */

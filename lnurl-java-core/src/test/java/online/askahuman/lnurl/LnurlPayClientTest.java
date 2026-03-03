@@ -467,6 +467,109 @@ class LnurlPayClientTest {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // probeDiscovery — discovery-only path (no amount, no invoice)
+    // -------------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("probeDiscovery")
+    class ProbeDiscovery {
+
+        private static final String ENDPOINT_JSON =
+                "{\"tag\":\"payRequest\",\"callback\":\"https://example.com/pay\"," +
+                "\"minSendable\":1000,\"maxSendable\":1000000000,\"metadata\":\"[]\"}";
+
+        @SuppressWarnings("unchecked")
+        private LnurlPayClient clientWithResponse(int statusCode, String body) throws Exception {
+            HttpClient mockHttp = mock(HttpClient.class);
+            HttpResponse<String> resp = mock(HttpResponse.class);
+            when(resp.statusCode()).thenReturn(statusCode);
+            when(resp.body()).thenReturn(body);
+            doReturn(resp).when(mockHttp).send(any(HttpRequest.class), any());
+            return new LnurlPayClient(mockHttp, true);
+        }
+
+        @Test
+        @DisplayName("success: returns endpoint with min/max from provider JSON")
+        void success_returnsEndpoint() throws Exception {
+            LnurlPayClient client = clientWithResponse(200, ENDPOINT_JSON);
+
+            LnurlPayClient.LnurlPayEndpoint endpoint = client.probeDiscovery("alice@example.com");
+
+            assertNotNull(endpoint);
+            assertEquals(1000L, endpoint.getMinSendable());
+            assertEquals(1000000000L, endpoint.getMaxSendable());
+            assertEquals("https://example.com/pay", endpoint.getCallback());
+        }
+
+        @Test
+        @DisplayName("HTTP 404 from provider -> LnurlException")
+        void http404_throwsLnurlException() throws Exception {
+            LnurlPayClient client = clientWithResponse(404, "{\"status\":\"ERROR\"}");
+
+            LnurlException ex = assertThrows(LnurlException.class,
+                    () -> client.probeDiscovery("alice@example.com"));
+            assertTrue(ex.getMessage().contains("probe failed") || ex.getMessage().contains("HTTP 404"),
+                    "Unexpected message: " + ex.getMessage());
+        }
+
+        @Test
+        @DisplayName("invalid JSON response -> LnurlException")
+        void invalidJson_throwsLnurlException() throws Exception {
+            LnurlPayClient client = clientWithResponse(200, "not-json-at-all{{{");
+
+            assertThrows(LnurlException.class, () -> client.probeDiscovery("alice@example.com"));
+        }
+
+        @Test
+        @DisplayName("private IP as provider domain -> IllegalArgumentException (SSRF)")
+        void privateIp_throwsIllegalArgumentException() {
+            LnurlPayClient client = LnurlPayClient.create(false); // lenient mode must not suppress
+
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                    () -> client.probeDiscovery("alice@192.168.1.1"));
+            assertTrue(ex.getMessage().contains("private/reserved"),
+                    "Unexpected message: " + ex.getMessage());
+        }
+
+        @Test
+        @DisplayName("bad format (no @) -> IllegalArgumentException")
+        void badFormat_throwsIllegalArgumentException() {
+            LnurlPayClient client = LnurlPayClient.create(false); // lenient mode must not suppress
+
+            assertThrows(IllegalArgumentException.class,
+                    () -> client.probeDiscovery("notanaddress"));
+        }
+
+        @Test
+        @DisplayName("wrong tag in endpoint -> LnurlException")
+        void wrongTag_throwsLnurlException() throws Exception {
+            String wrongTag = "{\"tag\":\"wrongTag\",\"callback\":\"https://example.com/pay\"," +
+                              "\"minSendable\":1000,\"maxSendable\":1000000000}";
+            LnurlPayClient client = clientWithResponse(200, wrongTag);
+
+            assertThrows(LnurlException.class, () -> client.probeDiscovery("alice@example.com"));
+        }
+
+        @Test
+        @DisplayName("resolveLightningAddress regression: still works via refactored fetchEndpoint")
+        void resolve_regressionViaFetchEndpoint() throws Exception {
+            // Endpoint succeeds; verify resolveLightningAddress still invokes the invoice step
+            HttpClient mockHttp = mock(HttpClient.class);
+            HttpResponse<String> endpointResp = mock(HttpResponse.class);
+            HttpResponse<String> invoiceResp = mock(HttpResponse.class);
+            when(endpointResp.statusCode()).thenReturn(200);
+            when(endpointResp.body()).thenReturn(ENDPOINT_JSON);
+            when(invoiceResp.statusCode()).thenReturn(200);
+            when(invoiceResp.body()).thenReturn("{\"pr\":\"lnbc_regression_invoice\"}");
+            doReturn(endpointResp).doReturn(invoiceResp).when(mockHttp).send(any(HttpRequest.class), any());
+            LnurlPayClient client = new LnurlPayClient(mockHttp, true);
+
+            String invoice = client.resolveLightningAddress("alice@example.com", 1000);
+            assertEquals("lnbc_regression_invoice", invoice);
+        }
+    }
+
     @Nested
     @DisplayName("Lifecycle Management")
     class LifecycleManagement {
