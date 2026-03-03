@@ -89,8 +89,16 @@ public class LnurlPayClient implements AutoCloseable {
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
-            throw new LnurlException("Lightning address probe failed: " + e.getMessage(), e);
+            throw new LnurlException("Lightning address probe failed: " + firstNonNullMessage(e), e);
         }
+    }
+
+    /** Walk the cause chain and return the first non-null exception message, or the class name. */
+    private static String firstNonNullMessage(Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            if (cause.getMessage() != null) return cause.getMessage();
+        }
+        return t.getClass().getSimpleName();
     }
 
     /**
