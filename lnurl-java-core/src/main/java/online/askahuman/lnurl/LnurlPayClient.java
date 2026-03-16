@@ -143,14 +143,11 @@ public class LnurlPayClient implements AutoCloseable {
             if (callbackUri.getScheme() == null || !callbackUri.getScheme().equals("https")) {
                 throw new LnurlException("LNURL-pay callback URL must use HTTPS scheme");
             }
-            // H-01: Callback host must match (or be a subdomain of) the provider domain
-            String callbackHost = callbackUri.getHost();
-            if (!isAllowedCallbackDomain(callbackHost, domain)) {
-                throw new LnurlException(
-                        "LNURL-pay callback host '" + callbackHost +
-                        "' does not match provider domain '" + domain + "'");
-            }
             // H-02: Reject private/loopback/link-local IP literals in callback URL
+            // Note: LUD-06 does not require the callback domain to match the discovery domain.
+            // Providers routinely use separate callback infrastructure (e.g. CDNs, API subdomains
+            // on entirely different TLDs). The meaningful SSRF protection is blocking private IPs.
+            String callbackHost = callbackUri.getHost();
             validateNotPrivateIpLiteral(callbackHost);
 
             // Step 4: Request invoice — use & if callback already has query params (LUD-06 § 5)
@@ -259,14 +256,6 @@ public class LnurlPayClient implements AutoCloseable {
         }
 
         return endpoint;
-    }
-
-    /** Returns true if {@code callbackHost} equals or is a subdomain of {@code providerDomain}. */
-    private static boolean isAllowedCallbackDomain(String callbackHost, String providerDomain) {
-        if (callbackHost == null || providerDomain == null) return false;
-        String h = callbackHost.toLowerCase();
-        String p = providerDomain.toLowerCase();
-        return h.equals(p) || h.endsWith("." + p);
     }
 
     /**
