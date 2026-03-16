@@ -373,15 +373,18 @@ class LnurlPayClientTest {
         }
 
         @Test
-        @DisplayName("callback host from a different domain is rejected (H-01 SSRF guard)")
-        void callbackFromDifferentDomain_throwsRuntimeException() throws Exception {
+        @DisplayName("callback host on a different domain is accepted (LUD-06 allows separate callback infrastructure)")
+        void callbackFromDifferentDomain_succeeds() throws Exception {
+            // LUD-06 does not require the callback domain to match the discovery domain.
+            // Real providers (e.g. Wallet of Satoshi) use separate domains for discovery vs callback.
             String endpointDifferentDomain =
-                    "{\"tag\":\"payRequest\",\"callback\":\"https://evil.com/pay\"," +
+                    "{\"tag\":\"payRequest\",\"callback\":\"https://other-infra.com/pay\"," +
                     "\"minSendable\":1000,\"maxSendable\":1000000000}";
-            LnurlPayClient client = clientWithOneResponse(endpointDifferentDomain);
+            String invoiceJson = "{\"pr\":\"lnbc100n1crossdomain_invoice\"}";
+            LnurlPayClient client = clientWithTwoResponses(endpointDifferentDomain, invoiceJson);
 
-            assertThrows(RuntimeException.class,
-                    () -> client.resolveLightningAddress("alice@example.com", 1000));
+            String invoice = client.resolveLightningAddress("alice@example.com", 1000);
+            assertEquals("lnbc100n1crossdomain_invoice", invoice);
         }
 
         @Test
@@ -433,7 +436,7 @@ class LnurlPayClientTest {
         }
 
         @Test
-        @DisplayName("subdomain callback from same provider is accepted (H-01)")
+        @DisplayName("subdomain callback from same provider is accepted")
         void callbackFromSubdomain_succeeds() throws Exception {
             // Provider is example.com; callback is on sub.example.com — allowed
             String endpointSubdomain =
