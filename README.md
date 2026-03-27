@@ -4,6 +4,8 @@ Java library for LNURL protocols — Bech32 encoding (LUD-01), LNURL-auth (LUD-0
 
 Verified compatible with Wallet of Satoshi and Aqua wallets.
 
+> **Built to power [AskAHuman](https://askahuman.online)** — a human verification marketplace where AI agents pay via Lightning to get answers from real people. Platform launching soon.
+
 ## Modules
 
 | Module | Purpose |
@@ -19,14 +21,14 @@ Verified compatible with Wallet of Satoshi and Aqua wallets.
 <dependency>
     <groupId>online.askahuman</groupId>
     <artifactId>lnurl-java-core</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.4</version>
 </dependency>
 
 <!-- Spring Boot autoconfiguration -->
 <dependency>
     <groupId>online.askahuman</groupId>
     <artifactId>lnurl-java-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.4</version>
 </dependency>
 ```
 
