@@ -32,3 +32,10 @@ docs/
 # Claude Code local files
 CLAUDE.local.md
 .claude/
+
+# IDE files
+.idea/
+*.iml
+.classpath
+.project
+.settings/
