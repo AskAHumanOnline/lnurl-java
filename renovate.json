@@ -1,0 +1,75 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":preserveSemverRanges"
+  ],
+  "timezone": "Europe/Amsterdam",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies"],
+
+  "packageRules": [
+    {
+      "description": "No auto-merge — every dep update is reviewed before the next tagged release",
+      "matchUpdateTypes": ["major", "minor", "patch", "pin", "digest"],
+      "automerge": false
+    },
+    {
+      "description": "Flag major updates for manual review",
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["major-update", "needs-review"]
+    },
+    {
+      "description": "Group test dependencies",
+      "groupName": "Test dependencies",
+      "matchPackagePrefixes": [
+        "org.junit",
+        "org.mockito",
+        "org.assertj",
+        "com.github.tomakehurst",
+        "org.wiremock"
+      ]
+    },
+    {
+      "description": "Group Maven plugins",
+      "groupName": "Maven plugins",
+      "matchPackagePrefixes": [
+        "org.apache.maven.plugins",
+        "org.jacoco"
+      ]
+    }
+  ],
+
+  "maven": {
+    "enabled": true
+  },
+
+  "java": {
+    "enabled": true
+  },
+
+  "prConcurrentLimit": 5,
+  "prCreation": "not-pending",
+  "prNotPendingHours": 2,
+
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
+
+  "commitMessagePrefix": "chore(deps):",
+  "commitMessageAction": "update",
+  "commitMessageTopic": "{{depName}}",
+  "commitMessageExtra": "to {{newValue}}",
+
+  "separateMajorMinor": true,
+  "separateMultipleMajor": true,
+
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  }
+}
