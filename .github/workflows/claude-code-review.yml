@@ -6,6 +6,7 @@ on:
 
 jobs:
   security-scan:
+    if: github.actor != 'renovate[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
