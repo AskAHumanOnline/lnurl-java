@@ -3,6 +3,7 @@ package online.askahuman.lnurl;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -12,6 +13,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -570,6 +573,179 @@ class LnurlPayClientTest {
 
             String invoice = client.resolveLightningAddress("alice@example.com", 1000);
             assertEquals("lnbc_regression_invoice", invoice);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // LUD-12 — comment parameter on invoice request
+    // -------------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("LUD-12 Comment Support")
+    class Lud12CommentSupport {
+
+        private static final String ENDPOINT_NO_COMMENT =
+                "{\"tag\":\"payRequest\",\"callback\":\"https://example.com/pay\"," +
+                "\"minSendable\":1000,\"maxSendable\":1000000000,\"metadata\":\"[]\"}";
+
+        private static final String ENDPOINT_COMMENT_ALLOWED_140 =
+                "{\"tag\":\"payRequest\",\"callback\":\"https://example.com/pay\"," +
+                "\"minSendable\":1000,\"maxSendable\":1000000000,\"metadata\":\"[]\"," +
+                "\"commentAllowed\":140}";
+
+        private static final String ENDPOINT_COMMENT_ALLOWED_10 =
+                "{\"tag\":\"payRequest\",\"callback\":\"https://example.com/pay\"," +
+                "\"minSendable\":1000,\"maxSendable\":1000000000,\"metadata\":\"[]\"," +
+                "\"commentAllowed\":10}";
+
+        private static final String INVOICE_JSON = "{\"pr\":\"lnbc100n1test_invoice\"}";
+
+        @SuppressWarnings("unchecked")
+        private record MockedClient(LnurlPayClient client, HttpClient httpClient) {}
+
+        @SuppressWarnings("unchecked")
+        private MockedClient buildClient(String endpointJson) throws Exception {
+            HttpClient mockHttp = mock(HttpClient.class);
+            HttpResponse<String> endpointResp = mock(HttpResponse.class);
+            HttpResponse<String> invoiceResp = mock(HttpResponse.class);
+            when(endpointResp.statusCode()).thenReturn(200);
+            when(endpointResp.body()).thenReturn(endpointJson);
+            when(invoiceResp.statusCode()).thenReturn(200);
+            when(invoiceResp.body()).thenReturn(INVOICE_JSON);
+            doReturn(endpointResp).doReturn(invoiceResp).when(mockHttp).send(any(HttpRequest.class), any());
+            return new MockedClient(new LnurlPayClient(mockHttp, true), mockHttp);
+        }
+
+        private String capturedInvoiceUrl(HttpClient mockHttp) throws Exception {
+            ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+            verify(mockHttp, times(2)).send(captor.capture(), any());
+            // The second request is the invoice request (first is the discovery endpoint)
+            return captor.getAllValues().get(1).uri().toString();
+        }
+
+        @Test
+        @DisplayName("commentAllowed absent from endpoint JSON defaults to 0")
+        void commentAllowedAbsent_defaultsToZero() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_NO_COMMENT);
+
+            mc.client().resolveLightningAddress("alice@example.com", 1000, "ignored");
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            assertFalse(url.contains("comment="),
+                    "Comment must not be sent when provider omits commentAllowed: " + url);
+        }
+
+        @Test
+        @DisplayName("commentAllowed parsed from endpoint JSON when present")
+        void commentAllowedPresent_parsedFromJson() throws Exception {
+            HttpClient mockHttp = mock(HttpClient.class);
+            @SuppressWarnings("unchecked")
+            HttpResponse<String> endpointResp = mock(HttpResponse.class);
+            when(endpointResp.statusCode()).thenReturn(200);
+            when(endpointResp.body()).thenReturn(ENDPOINT_COMMENT_ALLOWED_140);
+            doReturn(endpointResp).when(mockHttp).send(any(HttpRequest.class), any());
+            LnurlPayClient client = new LnurlPayClient(mockHttp, true);
+
+            LnurlPayClient.LnurlPayEndpoint endpoint = client.probeDiscovery("alice@example.com");
+            assertEquals(140L, endpoint.getCommentAllowed());
+        }
+
+        @Test
+        @DisplayName("comment appended as URL-encoded query param when provider allows it")
+        void commentAllowedAndProvided_appendsEncodedParam() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_COMMENT_ALLOWED_140);
+
+            mc.client().resolveLightningAddress("alice@example.com", 1000, "thanks for your work");
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            assertTrue(url.contains("&comment=thanks+for+your+work"),
+                    "Expected URL-encoded comment in invoice URL but got: " + url);
+            assertTrue(url.contains("amount=1000000"), "Amount must still be present: " + url);
+        }
+
+        @Test
+        @DisplayName("comment NOT appended when commentAllowed is 0 even if comment provided")
+        void commentAllowedZero_doesNotAppendComment() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_NO_COMMENT);
+
+            mc.client().resolveLightningAddress("alice@example.com", 1000, "hello there");
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            assertFalse(url.contains("comment="),
+                    "Comment must not be sent when commentAllowed is 0: " + url);
+        }
+
+        @Test
+        @DisplayName("comment NOT appended when comment is null")
+        void commentNull_doesNotAppendComment() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_COMMENT_ALLOWED_140);
+
+            mc.client().resolveLightningAddress("alice@example.com", 1000, null);
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            assertFalse(url.contains("comment="),
+                    "Comment must not be sent when caller passes null: " + url);
+        }
+
+        @Test
+        @DisplayName("comment NOT appended when comment is blank/whitespace")
+        void commentBlank_doesNotAppendComment() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_COMMENT_ALLOWED_140);
+
+            mc.client().resolveLightningAddress("alice@example.com", 1000, "   ");
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            assertFalse(url.contains("comment="),
+                    "Comment must not be sent when caller passes blank: " + url);
+        }
+
+        @Test
+        @DisplayName("comment truncated to commentAllowed characters (silent, no exception)")
+        void commentOverLimit_truncatedSilently() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_COMMENT_ALLOWED_10);
+
+            String twentyChars = "abcdefghij1234567890"; // 20 chars
+            mc.client().resolveLightningAddress("alice@example.com", 1000, twentyChars);
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            // commentAllowed=10 -> truncated to "abcdefghij"
+            assertTrue(url.contains("&comment=abcdefghij"),
+                    "Expected truncated comment in URL but got: " + url);
+            assertFalse(url.contains("1234567890"),
+                    "Truncated suffix must not appear in URL: " + url);
+        }
+
+        @Test
+        @DisplayName("special characters (space, #, ·, non-ASCII) are percent-encoded")
+        void commentWithSpecialChars_percentEncoded() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_COMMENT_ALLOWED_140);
+
+            // Mix of: space, #, middle-dot (U+00B7), and a non-Latin glyph
+            mc.client().resolveLightningAddress("alice@example.com", 1000, "hi #1 · café");
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            // URLEncoder uses + for space and percent-encodes #, multibyte UTF-8 sequences
+            assertTrue(url.contains("&comment="), "Comment param missing: " + url);
+            assertTrue(url.contains("hi+%231"),
+                    "Expected '#' percent-encoded as %23 and space as +: " + url);
+            assertTrue(url.contains("%C2%B7"),
+                    "Expected middle-dot encoded as UTF-8 %C2%B7: " + url);
+            assertTrue(url.contains("caf%C3%A9"),
+                    "Expected é encoded as UTF-8 %C3%A9: " + url);
+            // Raw characters must not appear unencoded
+            assertFalse(url.contains("#1"), "Raw '#' must not appear in URL: " + url);
+        }
+
+        @Test
+        @DisplayName("legacy 2-arg method produces invoice URL without comment param (regression guard)")
+        void twoArgOverload_sendsNoComment() throws Exception {
+            MockedClient mc = buildClient(ENDPOINT_COMMENT_ALLOWED_140);
+
+            mc.client().resolveLightningAddress("alice@example.com", 1000);
+
+            String url = capturedInvoiceUrl(mc.httpClient());
+            assertFalse(url.contains("comment="),
+                    "Legacy 2-arg overload must not append comment param: " + url);
         }
     }
 

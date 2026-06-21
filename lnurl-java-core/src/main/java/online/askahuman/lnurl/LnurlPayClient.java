@@ -6,9 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 /**
@@ -112,6 +114,29 @@ public class LnurlPayClient implements AutoCloseable {
      * @throws LnurlException           if resolution fails and failOnResolutionError=true
      */
     public String resolveLightningAddress(String lightningAddress, long amountSats) {
+        return resolveLightningAddress(lightningAddress, amountSats, null);
+    }
+
+    /**
+     * Resolve a Lightning address to a BOLT11 invoice using the LNURL-pay protocol, optionally
+     * attaching a human-readable note via the LUD-12 {@code comment} parameter.
+     *
+     * <p>The comment is only sent when the provider advertises {@code commentAllowed > 0} in its
+     * endpoint response. If the comment exceeds the provider's advertised limit it is truncated
+     * (LUD-12 is best-effort — a payout must succeed even when the note has to be clipped).
+     * Comments are URL-encoded with UTF-8. See
+     * <a href="https://github.com/lnurl/luds/blob/luds/12.md">LUD-12</a>.</p>
+     *
+     * @param lightningAddress Lightning address in format "username@domain.com"
+     * @param amountSats       payout amount in satoshis (must be &gt; 0)
+     * @param comment          optional note for the receiving wallet; ignored if null/blank or if
+     *                         the provider does not advertise {@code commentAllowed}
+     * @return BOLT11 invoice string (or mock invoice if resolution fails and failOnResolutionError=false)
+     * @throws IllegalArgumentException if the address format is invalid, the amount is &lt;= 0,
+     *                                  or the amount falls outside provider limits
+     * @throws LnurlException           if resolution fails and failOnResolutionError=true
+     */
+    public String resolveLightningAddress(String lightningAddress, long amountSats, String comment) {
         try {
             // Validate amount before any network activity
             if (amountSats <= 0) {
@@ -153,6 +178,12 @@ public class LnurlPayClient implements AutoCloseable {
             // Step 4: Request invoice — use & if callback already has query params (LUD-06 § 5)
             String separator = endpoint.getCallback().contains("?") ? "&" : "?";
             String invoiceUrl = endpoint.getCallback() + separator + "amount=" + amountMillisats;
+
+            // LUD-12: append &comment=<encoded> when both provider and caller opt in
+            String commentParam = buildCommentParam(comment, endpoint.getCommentAllowed());
+            if (commentParam != null) {
+                invoiceUrl = invoiceUrl + commentParam;
+            }
             log.log(System.Logger.Level.DEBUG, "Requesting invoice: {0}", invoiceUrl);
 
             HttpRequest invoiceRequest = HttpRequest.newBuilder()
@@ -295,6 +326,28 @@ public class LnurlPayClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Build the LUD-12 {@code &comment=...} URL fragment, or return {@code null} if no comment
+     * should be sent. Truncates over-long comments by code point count (not byte length) and
+     * URL-encodes the result with UTF-8.
+     */
+    private static String buildCommentParam(String comment, long commentAllowed) {
+        if (commentAllowed <= 0 || comment == null || comment.isBlank()) {
+            return null;
+        }
+        int allowed = commentAllowed > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) commentAllowed;
+        String value = comment;
+        int codePointCount = value.codePointCount(0, value.length());
+        if (codePointCount > allowed) {
+            int endIndex = value.offsetByCodePoints(0, allowed);
+            value = value.substring(0, endIndex);
+            log.log(System.Logger.Level.DEBUG,
+                    "LUD-12 comment truncated from {0} to {1} code points to fit commentAllowed",
+                    codePointCount, allowed);
+        }
+        return "&comment=" + URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
     private String handleResolutionError(String lightningAddress, long amountSats, Exception e) {
         log.log(System.Logger.Level.WARNING,
                 "LNURL-pay resolution failed for {0}: {1}", lightningAddress, e.getMessage());
@@ -330,6 +383,13 @@ public class LnurlPayClient implements AutoCloseable {
         @JsonProperty("tag")
         private String tag;
 
+        /**
+         * LUD-12 {@code commentAllowed} — max comment length in characters the provider accepts.
+         * Defaults to 0 (provider does not support comments) when the field is absent.
+         */
+        @JsonProperty("commentAllowed")
+        private long commentAllowed;
+
         public LnurlPayEndpoint() {}
 
         public String getCallback() { return callback; }
@@ -346,6 +406,9 @@ public class LnurlPayClient implements AutoCloseable {
 
         public String getTag() { return tag; }
         public void setTag(String tag) { this.tag = tag; }
+
+        public long getCommentAllowed() { return commentAllowed; }
+        public void setCommentAllowed(long commentAllowed) { this.commentAllowed = commentAllowed; }
     }
 
     /**
