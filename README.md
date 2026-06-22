@@ -21,14 +21,14 @@ Verified compatible with Wallet of Satoshi and Aqua wallets.
 <dependency>
     <groupId>online.askahuman</groupId>
     <artifactId>lnurl-java-core</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 
 <!-- Spring Boot autoconfiguration -->
 <dependency>
     <groupId>online.askahuman</groupId>
     <artifactId>lnurl-java-spring-boot-starter</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 ```
 
