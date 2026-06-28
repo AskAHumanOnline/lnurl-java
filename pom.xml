@@ -47,9 +47,9 @@
         <maven.compiler.source>${java.version}</maven.compiler.source>
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <spring-boot.version>4.0.2</spring-boot.version>
+        <spring-boot.version>4.0.6</spring-boot.version>
         <bouncycastle.version>1.84</bouncycastle.version>
-        <jackson.version>2.18.1</jackson.version>
+        <jackson.version>2.22.0</jackson.version>
         <wiremock.version>3.13.2</wiremock.version>
         <junit.version>5.14.4</junit.version>
         <mockito.version>5.23.0</mockito.version>
@@ -58,6 +58,18 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- Jackson 2.x BOM imported BEFORE spring-boot-dependencies so the whole
+                 com.fasterxml.jackson 2.x family (databind, core, annotations) stays aligned
+                 at ${jackson.version}. Spring Boot 4.0 ships Jackson 3; pinning only
+                 jackson-databind here left jackson-annotations on the BOM's older 2.x line,
+                 which is missing classes like JsonSerializeAs (NoClassDefFoundError at runtime). -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
@@ -69,11 +81,6 @@
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bcprov-jdk18on</artifactId>
                 <version>${bouncycastle.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.fasterxml.jackson.core</groupId>
-                <artifactId>jackson-databind</artifactId>
-                <version>${jackson.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.wiremock</groupId>
