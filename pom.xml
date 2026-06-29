@@ -51,7 +51,7 @@
         <bouncycastle.version>1.84</bouncycastle.version>
         <jackson.version>2.22.0</jackson.version>
         <wiremock.version>3.13.2</wiremock.version>
-        <junit.version>5.14.4</junit.version>
+        <junit.version>6.1.1</junit.version>
         <mockito.version>5.23.0</mockito.version>
         <assertj.version>3.27.7</assertj.version>
     </properties>
