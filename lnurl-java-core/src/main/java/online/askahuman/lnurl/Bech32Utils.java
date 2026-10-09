@@ -111,11 +111,7 @@ public final class Bech32Utils {
         }
 
         // Verify checksum: polymod(hrp-expand + all5bit) must equal 1
-        byte[] expanded = hrpExpand(HRP);
-        byte[] checksumInput = new byte[expanded.length + all5bit.length];
-        System.arraycopy(expanded, 0, checksumInput, 0, expanded.length);
-        System.arraycopy(all5bit, 0, checksumInput, expanded.length, all5bit.length);
-        if (polymod(checksumInput) != 1L) {
+        if (!hasValidChecksum(HRP, all5bit)) {
             throw new IllegalArgumentException(
                     "LNURL checksum verification failed (corrupted or tampered input)");
         }
@@ -133,6 +129,30 @@ public final class Bech32Utils {
         }
 
         return url;
+    }
+
+    /**
+     * Verifies a bech32 checksum.
+     *
+     * @param hrp   the lower-case human-readable part
+     * @param words the data part as 5-bit values, <em>including</em> the 6 trailing checksum words
+     */
+    static boolean hasValidChecksum(String hrp, byte[] words) {
+        byte[] expanded = hrpExpand(hrp);
+        byte[] all = new byte[expanded.length + words.length];
+        System.arraycopy(expanded, 0, all, 0, expanded.length);
+        System.arraycopy(words, 0, all, expanded.length, words.length);
+        return polymod(all) == 1L;
+    }
+
+    /**
+     * Maps a bech32 character to its 5-bit value.
+     *
+     * @return the value, or -1 if the character is not in the bech32 charset (including any
+     *         non-ASCII character)
+     */
+    static int wordValue(char c) {
+        return c < CHARSET_REV.length ? CHARSET_REV[c] : -1;
     }
 
     private static long polymod(byte[] values) {

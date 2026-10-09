@@ -221,4 +221,76 @@ class Bech32UtilsTest {
         assertThrows(IllegalArgumentException.class,
                 () -> Bech32Utils.decodeLnurl(tampered));
     }
+
+    // -------------------------------------------------------------------------
+    // hasValidChecksum / wordValue (package-private helpers)
+    // -------------------------------------------------------------------------
+
+    private static final String CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+    /** The data part of an LNURL (everything after the "lnurl1" separator) as 5-bit values. */
+    private static byte[] lnurlWords() {
+        var encoded = Bech32Utils.encodeLnurl("https://example.com/auth?tag=login&k1=abc").toLowerCase();
+        var data = encoded.substring("lnurl1".length());
+        var words = new byte[data.length()];
+        for (int i = 0; i < data.length(); i++) {
+            words[i] = (byte) CHARSET.indexOf(data.charAt(i));
+        }
+        return words;
+    }
+
+    @Test
+    @DisplayName("hasValidChecksum should accept the words of a valid LNURL")
+    void hasValidChecksum_validWords_returnsTrue() {
+        assertTrue(Bech32Utils.hasValidChecksum("lnurl", lnurlWords()));
+    }
+
+    @Test
+    @DisplayName("hasValidChecksum should reject a different human-readable part")
+    void hasValidChecksum_wrongHrp_returnsFalse() {
+        assertFalse(Bech32Utils.hasValidChecksum("lnbc", lnurlWords()));
+    }
+
+    @Test
+    @DisplayName("hasValidChecksum should reject words with any single value changed")
+    void hasValidChecksum_oneFlippedWord_returnsFalse() {
+        var words = lnurlWords();
+        for (int i = 0; i < words.length; i++) {
+            var tampered = words.clone();
+            tampered[i] = (byte) ((tampered[i] + 1) & 0x1f);
+            assertFalse(Bech32Utils.hasValidChecksum("lnurl", tampered), "word " + i);
+        }
+    }
+
+    @Test
+    @DisplayName("hasValidChecksum should reject an empty word array")
+    void hasValidChecksum_emptyWords_returnsFalse() {
+        assertFalse(Bech32Utils.hasValidChecksum("lnurl", new byte[0]));
+    }
+
+    @Test
+    @DisplayName("wordValue should map every charset character to its index")
+    void wordValue_validCharacters_returnIndex() {
+        for (int i = 0; i < CHARSET.length(); i++) {
+            assertEquals(i, Bech32Utils.wordValue(CHARSET.charAt(i)));
+        }
+        assertEquals(0, Bech32Utils.wordValue('q'));
+        assertEquals(31, Bech32Utils.wordValue('l'));
+    }
+
+    @Test
+    @DisplayName("wordValue should return -1 for ASCII characters outside the charset")
+    void wordValue_invalidAscii_returnsMinusOne() {
+        for (char c : new char[] {'b', 'i', 'o', '1', 'Q', 'A', ' ', '~', '\0'}) {
+            assertEquals(-1, Bech32Utils.wordValue(c), "char " + (int) c);
+        }
+    }
+
+    @Test
+    @DisplayName("wordValue should return -1 for non-ASCII characters")
+    void wordValue_nonAscii_returnsMinusOne() {
+        for (char c : new char[] {'\u00e9', '\u212a', '\uff51', '\u0080', '\uffff'}) {
+            assertEquals(-1, Bech32Utils.wordValue(c), "char " + (int) c);
+        }
+    }
 }

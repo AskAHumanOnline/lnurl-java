@@ -87,9 +87,29 @@ LnurlPayClient client = LnurlPayClient.create(true);
 String invoice = client.resolveLightningAddress("alice@getalby.com", 1000); // 1000 sats
 // Pay `invoice` via Lightning
 
-// Development mode: returns mock invoice on failure instead of throwing
+// Development mode: returns a mock invoice when the provider cannot be reached or resolved,
+// instead of throwing (a refused invoice, see below, still throws)
 LnurlPayClient devClient = LnurlPayClient.create(false);
 ```
+
+#### Invoice validation (LUD-06 step 7)
+
+The provider that answers the invoice request is not trusted. Before returning the `pr` invoice,
+`resolveLightningAddress` checks that it is a well-formed, checksum-valid BOLT11 invoice, carries an
+amount, asks for **exactly** the requested amount (compared in millisatoshis) and has not expired.
+Otherwise it throws `LnurlInvoiceRejectedException` (see `getReason()`), in both strict and
+development mode: a refused invoice is never replaced by a mock invoice.
+
+Not checked by the library, because they are policy for the application: the network (mainnet,
+testnet, ...) the invoice is for and a minimum remaining validity. The invoice signature is not
+verified either; pay the returned invoice with a node that does, so the amount that was checked is
+the amount that is paid.
+
+The description hash (`h` tag) is not checked: the current LUD-06 text no longer requires it, and a
+malicious provider controls both the metadata and the hash anyway.
+
+> **Behaviour change:** providers whose invoices do not match the requested amount, or that return
+> an unparseable `pr`, used to be accepted and are now refused.
 
 ### LND REST Client
 
