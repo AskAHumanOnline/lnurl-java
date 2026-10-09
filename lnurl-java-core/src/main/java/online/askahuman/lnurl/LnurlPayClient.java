@@ -11,6 +11,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 
 /**
@@ -23,6 +24,8 @@ import java.time.Duration;
  *   <li>Parse response with callback URL, min/max amounts</li>
  *   <li>Request invoice: GET {callback}?amount={millisats}</li>
  *   <li>Parse response with BOLT11 invoice</li>
+ *   <li>Verify the invoice is well-formed, carries an amount equal to the one requested and has not
+ *       expired (LUD-06 step 7); otherwise throw {@link LnurlInvoiceRejectedException}</li>
  * </ol>
  *
  * <p>This is a pure Java implementation with no Spring dependencies.
@@ -40,17 +43,26 @@ public class LnurlPayClient implements AutoCloseable {
     private final HttpClient httpClient;
     private final boolean failOnResolutionError;
     private final ObjectMapper objectMapper;
+    private final Clock clock;
 
     /**
      * Create a new LNURL-pay client with the given HttpClient.
      *
      * @param httpClient             the HTTP client to use for LNURL-pay requests
      * @param failOnResolutionError  if true, resolution failures throw RuntimeException;
-     *                               if false, a mock invoice is returned instead
+     *                               if false, a mock invoice is returned instead (this never
+     *                               applies to an invoice the provider returned but that failed
+     *                               validation, see {@link LnurlInvoiceRejectedException})
      */
     public LnurlPayClient(HttpClient httpClient, boolean failOnResolutionError) {
+        this(httpClient, failOnResolutionError, Clock.systemUTC());
+    }
+
+    /** Test seam: lets tests control "now" when checking invoice expiry. */
+    LnurlPayClient(HttpClient httpClient, boolean failOnResolutionError, Clock clock) {
         this.httpClient = httpClient;
         this.failOnResolutionError = failOnResolutionError;
+        this.clock = clock;
         this.objectMapper = new ObjectMapper();
         this.objectMapper.deactivateDefaultTyping();
         log.log(System.Logger.Level.INFO,
@@ -108,9 +120,13 @@ public class LnurlPayClient implements AutoCloseable {
      *
      * @param lightningAddress Lightning address in format "username@domain.com"
      * @param amountSats       payout amount in satoshis (must be &gt; 0)
-     * @return BOLT11 invoice string (or mock invoice if resolution fails and failOnResolutionError=false)
+     * @return BOLT11 invoice string for exactly {@code amountSats} (or a mock invoice if resolution
+     *         fails and failOnResolutionError=false; a refused invoice is never mocked, it throws)
      * @throws IllegalArgumentException if the address format is invalid, the amount is &lt;= 0,
      *                                  or the amount falls outside provider limits
+     * @throws LnurlInvoiceRejectedException if the provider's invoice is malformed, amountless,
+     *                                  for a different amount than requested, or expired; thrown
+     *                                  regardless of failOnResolutionError
      * @throws LnurlException           if resolution fails and failOnResolutionError=true
      */
     public String resolveLightningAddress(String lightningAddress, long amountSats) {
@@ -131,9 +147,13 @@ public class LnurlPayClient implements AutoCloseable {
      * @param amountSats       payout amount in satoshis (must be &gt; 0)
      * @param comment          optional note for the receiving wallet; ignored if null/blank or if
      *                         the provider does not advertise {@code commentAllowed}
-     * @return BOLT11 invoice string (or mock invoice if resolution fails and failOnResolutionError=false)
+     * @return BOLT11 invoice string for exactly {@code amountSats} (or a mock invoice if resolution
+     *         fails and failOnResolutionError=false; a refused invoice is never mocked, it throws)
      * @throws IllegalArgumentException if the address format is invalid, the amount is &lt;= 0,
      *                                  or the amount falls outside provider limits
+     * @throws LnurlInvoiceRejectedException if the provider's invoice is malformed, amountless,
+     *                                  for a different amount than requested, or expired; thrown
+     *                                  regardless of failOnResolutionError
      * @throws LnurlException           if resolution fails and failOnResolutionError=true
      */
     public String resolveLightningAddress(String lightningAddress, long amountSats, String comment) {
@@ -143,6 +163,14 @@ public class LnurlPayClient implements AutoCloseable {
                 throw new IllegalArgumentException(
                         "amountSats must be greater than 0, got: " + amountSats);
             }
+            // Checked: an overflowing product must not wrap into a small, different amount
+            long amountMillisats;
+            try {
+                amountMillisats = Math.multiplyExact(amountSats, 1000L);
+            } catch (ArithmeticException e) {
+                throw new IllegalArgumentException(
+                        "amountSats is too large to express in millisatoshis: " + amountSats);
+            }
 
             log.log(System.Logger.Level.DEBUG,
                     "Resolving Lightning address: {0} for {1} sats", lightningAddress, amountSats);
@@ -151,7 +179,6 @@ public class LnurlPayClient implements AutoCloseable {
             String domain = lightningAddress.split("@", 2)[1]; // safe: fetchEndpoint already validated format
 
             // Step 3: Validate amount against provider limits
-            long amountMillisats = amountSats * 1000L;
             if (amountMillisats < endpoint.getMinSendable()) {
                 throw new IllegalArgumentException(
                         "Amount " + amountSats + " sats (" + amountMillisats +
@@ -206,15 +233,27 @@ public class LnurlPayClient implements AutoCloseable {
                 throw new LnurlException("Invalid LNURL-pay invoice response");
             }
 
+            // Step 7 (LUD-06): the provider is untrusted, so never hand back an invoice that does
+            // not ask for exactly the amount that was requested. Validate and return one local
+            // value, so what was checked is what is returned.
+            String pr = invoiceResult.getPr();
+            validateInvoice(pr, amountMillisats);
+
             log.log(System.Logger.Level.INFO,
                     "Successfully resolved Lightning address {0} to invoice", lightningAddress);
-            return invoiceResult.getPr();
+            return pr;
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new LnurlException("LNURL-pay request interrupted", e);
         } catch (IllegalArgumentException e) {
             // Input validation failures always propagate — not swallowed by lenient mode
+            throw e;
+        } catch (LnurlInvoiceRejectedException e) {
+            // A refused invoice is a security signal, not an outage: lenient mode must not turn
+            // it into a mock invoice. Log the reason only, never provider-supplied text.
+            log.log(System.Logger.Level.WARNING,
+                    "LNURL-pay provider invoice refused for {0}: {1}", lightningAddress, e.getReason());
             throw e;
         } catch (Exception e) {
             return handleResolutionError(lightningAddress, amountSats, e);
@@ -224,6 +263,38 @@ public class LnurlPayClient implements AutoCloseable {
     @Override
     public void close() {
         httpClient.close();
+    }
+
+    /**
+     * Refuses an invoice that is malformed, has no amount, asks for a different amount than
+     * requested, or has already expired.
+     */
+    private void validateInvoice(String pr, long expectedMillisats) {
+        Bolt11Invoice invoice;
+        try {
+            invoice = Bolt11Invoice.parse(pr);
+        } catch (LnurlInvoiceRejectedException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            // Backstop: any unexpected parser failure must refuse the invoice. Letting it reach
+            // the generic handler would, in lenient mode, replace it with a mock invoice.
+            // The cause is dropped on purpose: it could carry provider-supplied text.
+            throw new LnurlInvoiceRejectedException(
+                    LnurlInvoiceRejectedException.Reason.MALFORMED, "invoice could not be parsed");
+        }
+        if (invoice.amountMsat() == null) {
+            throw new LnurlInvoiceRejectedException(
+                    LnurlInvoiceRejectedException.Reason.AMOUNTLESS, "invoice has no amount");
+        }
+        if (invoice.amountMsat().longValue() != expectedMillisats) {
+            throw new LnurlInvoiceRejectedException(
+                    LnurlInvoiceRejectedException.Reason.AMOUNT_MISMATCH,
+                    "invoice amount differs from the amount requested");
+        }
+        if (!clock.instant().isBefore(invoice.expiresAt())) {
+            throw new LnurlInvoiceRejectedException(
+                    LnurlInvoiceRejectedException.Reason.EXPIRED, "invoice has expired");
+        }
     }
 
     /**

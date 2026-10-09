@@ -353,12 +353,13 @@ class LnurlPayClientTest {
         @Test
         @DisplayName("successful resolution returns the BOLT11 invoice from provider")
         void successfulResolution_returnsInvoice() throws Exception {
-            String invoiceJson = "{\"pr\":\"lnbc100n1test_invoice\"}";
+            var expected = TestInvoices.mainnetForSats(1000);
+            String invoiceJson = TestInvoices.callbackBody(expected);
             LnurlPayClient client = clientWithTwoResponses(ENDPOINT_JSON, invoiceJson);
 
             String invoice = client.resolveLightningAddress("alice@example.com", 1000);
 
-            assertEquals("lnbc100n1test_invoice", invoice);
+            assertEquals(expected, invoice);
         }
 
         @Test
@@ -367,12 +368,13 @@ class LnurlPayClientTest {
             String endpointWithQuery =
                     "{\"tag\":\"payRequest\",\"callback\":\"https://example.com/pay?token=abc\"," +
                     "\"minSendable\":1000,\"maxSendable\":1000000000}";
-            String invoiceJson = "{\"pr\":\"lnbc200n1test_invoice\"}";
+            var expected = TestInvoices.mainnetForSats(2000);
+            String invoiceJson = TestInvoices.callbackBody(expected);
             LnurlPayClient client = clientWithTwoResponses(endpointWithQuery, invoiceJson);
 
             String invoice = client.resolveLightningAddress("alice@example.com", 2000);
 
-            assertEquals("lnbc200n1test_invoice", invoice);
+            assertEquals(expected, invoice);
         }
 
         @Test
@@ -383,11 +385,12 @@ class LnurlPayClientTest {
             String endpointDifferentDomain =
                     "{\"tag\":\"payRequest\",\"callback\":\"https://other-infra.com/pay\"," +
                     "\"minSendable\":1000,\"maxSendable\":1000000000}";
-            String invoiceJson = "{\"pr\":\"lnbc100n1crossdomain_invoice\"}";
+            var expected = TestInvoices.mainnetForSats(1000);
+            String invoiceJson = TestInvoices.callbackBody(expected);
             LnurlPayClient client = clientWithTwoResponses(endpointDifferentDomain, invoiceJson);
 
             String invoice = client.resolveLightningAddress("alice@example.com", 1000);
-            assertEquals("lnbc100n1crossdomain_invoice", invoice);
+            assertEquals(expected, invoice);
         }
 
         @Test
@@ -445,11 +448,12 @@ class LnurlPayClientTest {
             String endpointSubdomain =
                     "{\"tag\":\"payRequest\",\"callback\":\"https://sub.example.com/pay\"," +
                     "\"minSendable\":1000,\"maxSendable\":1000000000}";
-            String invoiceJson = "{\"pr\":\"lnbc100n1subdomain_invoice\"}";
+            var expected = TestInvoices.mainnetForSats(1000);
+            String invoiceJson = TestInvoices.callbackBody(expected);
             LnurlPayClient client = clientWithTwoResponses(endpointSubdomain, invoiceJson);
 
             String invoice = client.resolveLightningAddress("alice@example.com", 1000);
-            assertEquals("lnbc100n1subdomain_invoice", invoice);
+            assertEquals(expected, invoice);
         }
 
         @Test
@@ -567,12 +571,13 @@ class LnurlPayClientTest {
             when(endpointResp.statusCode()).thenReturn(200);
             when(endpointResp.body()).thenReturn(ENDPOINT_JSON);
             when(invoiceResp.statusCode()).thenReturn(200);
-            when(invoiceResp.body()).thenReturn("{\"pr\":\"lnbc_regression_invoice\"}");
+            var expected = TestInvoices.mainnetForSats(1000);
+            when(invoiceResp.body()).thenReturn(TestInvoices.callbackBody(expected));
             doReturn(endpointResp).doReturn(invoiceResp).when(mockHttp).send(any(HttpRequest.class), any());
             LnurlPayClient client = new LnurlPayClient(mockHttp, true);
 
             String invoice = client.resolveLightningAddress("alice@example.com", 1000);
-            assertEquals("lnbc_regression_invoice", invoice);
+            assertEquals(expected, invoice);
         }
     }
 
@@ -598,7 +603,8 @@ class LnurlPayClientTest {
                 "\"minSendable\":1000,\"maxSendable\":1000000000,\"metadata\":\"[]\"," +
                 "\"commentAllowed\":10}";
 
-        private static final String INVOICE_JSON = "{\"pr\":\"lnbc100n1test_invoice\"}";
+        private static final String INVOICE_JSON =
+                TestInvoices.callbackBody(TestInvoices.mainnetForSats(1000));
 
         @SuppressWarnings("unchecked")
         private record MockedClient(LnurlPayClient client, HttpClient httpClient) {}
