@@ -7,11 +7,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
@@ -22,12 +25,13 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.Arrays;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 /**
  * LND REST API client for Lightning Network operations.
@@ -56,6 +60,15 @@ public class LndClient implements AutoCloseable {
     /** How long to attempt a payment before giving up (seconds). */
     private static final int PAYMENT_TIMEOUT_SECONDS = 60;
 
+    /** Upper bound on establishing a connection to LND. */
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+
+    /** HTTP deadline for a payment: LND's own attempt timeout plus a grace period. */
+    private static final Duration PAYMENT_REQUEST_TIMEOUT = Duration.ofSeconds(PAYMENT_TIMEOUT_SECONDS + 15L);
+
+    /** HTTP deadline for a payment status lookup. */
+    private static final Duration TRACK_REQUEST_TIMEOUT = Duration.ofSeconds(15);
+
     /** Bounded to prevent unbounded heap growth under sustained mock-mode load testing. */
     private static final int MAX_MOCK_PAYMENT_ENTRIES = 10_000;
 
@@ -83,7 +96,7 @@ public class LndClient implements AutoCloseable {
         this(host, restPort, macaroon, httpClient, false);
     }
 
-    private LndClient(String host, int restPort, String macaroon, HttpClient httpClient, boolean strictMode) {
+    LndClient(String host, int restPort, String macaroon, HttpClient httpClient, boolean strictMode) {
         this.baseUrl = "https://" + host + ":" + restPort;
         this.macaroon = macaroon;
         this.httpClient = httpClient;
@@ -100,7 +113,7 @@ public class LndClient implements AutoCloseable {
      * @param macaroon hex-encoded admin macaroon
      */
     public LndClient(String host, int restPort, String macaroon) {
-        this(host, restPort, macaroon, HttpClient.newHttpClient(), true);
+        this(host, restPort, macaroon, HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(), true);
     }
 
     /**
@@ -140,7 +153,7 @@ public class LndClient implements AutoCloseable {
                     "LndClient initialized with macaroon for {0}:{1}", host, String.valueOf(restPort));
         }
 
-        HttpClient.Builder builder = HttpClient.newBuilder();
+        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT);
         if (tlsCertPath != null && !tlsCertPath.isBlank()) {
             // Throws IllegalStateException if the cert cannot be loaded
             SSLContext sslContext = loadTlsCert(tlsCertPath);
@@ -393,22 +406,30 @@ public class LndClient implements AutoCloseable {
     /**
      * Pay a Lightning invoice via LND SendPaymentV2 (/v2/router/send).
      *
-     * <p>Uses the recommended V2 router API instead of the deprecated
-     * /v1/channels/transactions endpoint. Key improvements:</p>
+     * <p>Returns only when LND reports {@code SUCCEEDED} with a preimage that hashes to the
+     * payment hash. Every other outcome is a distinct exception:</p>
      * <ul>
-     *   <li>timeout_seconds: payment attempt expires after 60s (no indefinite hangs)</li>
-     *   <li>fee_limit_sat: caps routing fees at MAX_FEE_SATS (100 sats by default)</li>
-     *   <li>no_inflight_updates: only stream the final SUCCEEDED/FAILED result</li>
+     *   <li>{@link PaymentFailedException}: LND confirmed the payment failed; nothing was sent.</li>
+     *   <li>{@link PaymentOutcomeUnknownException}: the payment may still settle (HTTP timeout,
+     *       dropped connection, in flight, error or unrecognised response). Resolve it with
+     *       {@link #trackPayment(String)} before paying anything else.</li>
+     *   <li>{@link LnurlException}: the request provably never reached LND's payment router
+     *       (connection refused, TLS handshake failed, request rejected as invalid or
+     *       unauthorised).</li>
      * </ul>
      *
-     * <p>The response is a streaming NDJSON body; we read the entire body, then
-     * parse the last JSON line to extract the final payment status.</p>
+     * <p>The request carries {@code timeout_seconds} and {@code fee_limit_sat}, and the HTTP call
+     * has its own deadline, so a stalled node or gateway cannot block the caller indefinitely.
+     * In non-strict mode only connection-level failures fall back to a mock response.</p>
      *
      * @param paymentRequest the BOLT11 invoice to pay
-     * @return the payment response
-     * @throws LnurlException if LND is unavailable and strict mode is enabled
+     * @return the successful payment response
+     * @throws PaymentFailedException         if LND confirmed the payment failed
+     * @throws PaymentOutcomeUnknownException if it is not known whether the payment was sent
+     * @throws LnurlException                 if the request never reached LND
      */
     public PayInvoiceResponse payInvoice(String paymentRequest) {
+        HttpRequest request;
         try {
             String json = objectMapper.writeValueAsString(Map.of(
                     "payment_request", paymentRequest,
@@ -416,35 +437,103 @@ public class LndClient implements AutoCloseable {
                     "fee_limit_sat", MAX_FEE_SATS,
                     "no_inflight_updates", true
             ));
-
-            HttpRequest request = HttpRequest.newBuilder()
+            request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/v2/router/send"))
                     .header("Grpc-Metadata-macaroon", macaroon)
                     .header("Content-Type", "application/json")
+                    .timeout(PAYMENT_REQUEST_TIMEOUT)
                     .POST(HttpRequest.BodyPublishers.ofString(json))
                     .build();
+        } catch (IOException e) {
+            throw new LnurlException("Could not build the payment request", e);
+        }
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            PayInvoiceResponse result = parsePaymentResult(response.body());
-
-            log.log(System.Logger.Level.INFO, "Paid invoice: hash={0}, status={1}",
-                    result.paymentHash(), result.status());
-            return result;
-
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new LnurlException("LND request interrupted", e);
-        } catch (Exception e) {
-            return createMockPayResponse(e);
+            throw new PaymentOutcomeUnknownException("request interrupted", e);
+        } catch (IOException e) {
+            if (!strictMode) {
+                return createMockPayResponse(e);
+            }
+            if (neverReachedLnd(e)) {
+                throw new LnurlException("LND is unavailable (strict mode enabled): " + e.getMessage(), e);
+            }
+            throw new PaymentOutcomeUnknownException("no complete response (" + e.getClass().getSimpleName() + ")", e);
         }
+
+        requireAcceptedStatus(response.statusCode());
+        PayInvoiceResponse result = parsePaymentResult(response.body());
+        log.log(System.Logger.Level.INFO, "Paid invoice: hash={0}, status={1}",
+                result.paymentHash(), result.status());
+        return result;
+    }
+
+    /**
+     * Look up the current state of a payment via LND TrackPaymentV2 (/v2/router/track/{hash}).
+     *
+     * <p>Use this to resolve a {@link PaymentOutcomeUnknownException}. Only the first state LND
+     * reports is read, so the call returns promptly even for a payment still in flight.
+     * Never falls back to mock data: if the state cannot be determined it throws.</p>
+     *
+     * @param paymentHash the payment hash to look up (exactly 64 hex characters)
+     * @return the payment's current state
+     * @throws IllegalArgumentException       if paymentHash is not exactly 64 hex characters
+     * @throws PaymentOutcomeUnknownException if the state could not be determined
+     * @throws LnurlException                 if LND rejected the request as invalid or unauthorised
+     */
+    public PaymentTrackResult trackPayment(String paymentHash) {
+        validatePaymentHash(paymentHash);
+        // The hash is a protobuf bytes path parameter, which the REST gateway expects base64url-encoded.
+        String pathHash = Base64.getUrlEncoder().encodeToString(HexFormat.of().parseHex(paymentHash));
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/v2/router/track/" + pathHash))
+                .header("Grpc-Metadata-macaroon", macaroon)
+                .timeout(TRACK_REQUEST_TIMEOUT)
+                .GET()
+                .build();
+
+        String firstLine;
+        int status;
+        try {
+            HttpResponse<Stream<String>> response = httpClient.send(request, HttpResponse.BodyHandlers.ofLines());
+            status = response.statusCode();
+            try (Stream<String> lines = response.body()) {
+                firstLine = lines.map(String::strip).filter(line -> !line.isEmpty()).findFirst().orElse("");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new PaymentOutcomeUnknownException("request interrupted", e);
+        } catch (IOException e) {
+            throw new PaymentOutcomeUnknownException("no response (" + e.getClass().getSimpleName() + ")", e);
+        }
+
+        return parseTrackResult(paymentHash, status, firstLine);
+    }
+
+    /** True when the failure happened before the request could have reached LND's payment router. */
+    private static boolean neverReachedLnd(IOException e) {
+        return e instanceof ConnectException
+                || e instanceof HttpConnectTimeoutException
+                || e instanceof SSLHandshakeException;
+    }
+
+    /** 2xx proceeds; 400/401/403 mean LND refused the request outright; anything else is ambiguous. */
+    private static void requireAcceptedStatus(int status) {
+        if (status >= 200 && status < 300) {
+            return;
+        }
+        if (status == 400 || status == 401 || status == 403) {
+            throw new LnurlException("LND rejected the request (HTTP " + status + ")");
+        }
+        throw new PaymentOutcomeUnknownException("unexpected HTTP status " + status);
     }
 
     private PayInvoiceResponse createMockPayResponse(Exception cause) {
-        if (strictMode) {
-            throw new LnurlException("LND is unavailable (strict mode enabled): " + cause.getMessage(), cause);
-        }
         log.log(System.Logger.Level.WARNING,
-                "LND not available or payment failed, using mock payment: {0}", cause.getMessage());
+                "LND not available, using mock payment: {0}", cause.getMessage());
         return new PayInvoiceResponse(
                 "mock_payout_hash_" + System.currentTimeMillis(),
                 "mock_preimage_" + System.currentTimeMillis(),
@@ -453,30 +542,96 @@ public class LndClient implements AutoCloseable {
     }
 
     /**
-     * Parse the final payment status from a /v2/router/send NDJSON body.
-     * Each line has the form: {"result": {"payment_hash": "...", "status": "SUCCEEDED", ...}}
+     * Interpret a /v2/router/send NDJSON body. Each line has the form
+     * {@code {"result": {"payment_hash": "...", "status": "SUCCEEDED", ...}}}. Only a terminal
+     * {@code SUCCEEDED}/{@code FAILED} line counts; error envelopes, in-flight updates and
+     * unparseable lines never produce a result.
      */
-    private PayInvoiceResponse parsePaymentResult(String ndjsonBody) throws IOException {
-        String lastLine = Arrays.stream(ndjsonBody.split("\n"))
-                .map(String::trim)
-                .filter(line -> !line.isEmpty())
-                .reduce((first, second) -> second)
-                .orElseThrow(() -> new LnurlException("Empty response from /v2/router/send"));
-
-        JsonNode root = objectMapper.readTree(lastLine);
-        JsonNode result = root.path("result");
-
-        String status = result.path("status").asText("UNKNOWN");
-        if ("FAILED".equals(status)) {
-            String reason = result.path("failure_reason").asText("unknown");
-            throw new LnurlException("Payment failed: " + reason);
+    private PayInvoiceResponse parsePaymentResult(String ndjsonBody) {
+        JsonNode terminal = null;
+        for (String line : ndjsonBody.split("\n")) {
+            JsonNode result = resultOf(line);
+            String status = result.path("status").asText("");
+            if ("SUCCEEDED".equals(status) || "FAILED".equals(status)) {
+                terminal = result;
+            }
+        }
+        if (terminal == null) {
+            throw new PaymentOutcomeUnknownException("response held no terminal payment status");
+        }
+        if ("FAILED".equals(terminal.path("status").asText())) {
+            throw new PaymentFailedException(terminal.path("failure_reason").asText(null));
         }
 
-        return new PayInvoiceResponse(
-                result.path("payment_hash").asText(),
-                result.path("payment_preimage").asText(),
-                status
-        );
+        String hash = terminal.path("payment_hash").asText("");
+        String preimage = terminal.path("payment_preimage").asText("");
+        if (!preimageMatchesHash(preimage, hash)) {
+            throw new PaymentOutcomeUnknownException("success response failed the preimage check");
+        }
+        return new PayInvoiceResponse(hash, preimage, "SUCCEEDED");
+    }
+
+    private PaymentTrackResult parseTrackResult(String requestedHash, int httpStatus, String line) {
+        JsonNode root = parseLine(line);
+        JsonNode result = root.path("result");
+
+        if (result.isObject()) {
+            requireAcceptedStatus(httpStatus);
+            return trackResultOf(requestedHash, result);
+        }
+        if (root.path("message").asText("").contains("isn't initiated")) {
+            return new PaymentTrackResult(PaymentTrackResult.Outcome.NOT_INITIATED, requestedHash, null, null);
+        }
+        requireAcceptedStatus(httpStatus);
+        throw new PaymentOutcomeUnknownException("response held no payment status");
+    }
+
+    private PaymentTrackResult trackResultOf(String requestedHash, JsonNode result) {
+        if (!requestedHash.equalsIgnoreCase(result.path("payment_hash").asText(""))) {
+            throw new PaymentOutcomeUnknownException("response was for a different payment");
+        }
+        return switch (result.path("status").asText("")) {
+            case "SUCCEEDED" -> {
+                String preimage = result.path("payment_preimage").asText("");
+                if (!preimageMatchesHash(preimage, requestedHash)) {
+                    throw new PaymentOutcomeUnknownException("success response failed the preimage check");
+                }
+                yield new PaymentTrackResult(PaymentTrackResult.Outcome.SUCCEEDED, requestedHash, preimage, null);
+            }
+            case "FAILED" -> new PaymentTrackResult(PaymentTrackResult.Outcome.FAILED, requestedHash, null,
+                    new PaymentFailedException(result.path("failure_reason").asText(null)).getFailureReason());
+            case "INITIATED", "IN_FLIGHT" ->
+                    new PaymentTrackResult(PaymentTrackResult.Outcome.IN_FLIGHT, requestedHash, null, null);
+            default -> throw new PaymentOutcomeUnknownException("unrecognised payment status");
+        };
+    }
+
+    /** The {@code result} object of one NDJSON line, or a missing node if the line has none. */
+    private JsonNode resultOf(String line) {
+        return parseLine(line).path("result");
+    }
+
+    private JsonNode parseLine(String line) {
+        try {
+            return objectMapper.readTree(line.strip());
+        } catch (IOException e) {
+            return objectMapper.missingNode();
+        }
+    }
+
+    /** True when both are 64-char hex and SHA-256(preimage) equals the payment hash. */
+    private static boolean preimageMatchesHash(String preimageHex, String hashHex) {
+        if (preimageHex.length() != 64 || hashHex.length() != 64) {
+            return false;
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(HexFormat.of().parseHex(preimageHex));
+            return MessageDigest.isEqual(digest, HexFormat.of().parseHex(hashHex));
+        } catch (IllegalArgumentException e) {
+            return false;
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
     }
 
     /**
