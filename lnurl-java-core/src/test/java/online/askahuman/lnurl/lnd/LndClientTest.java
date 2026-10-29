@@ -215,6 +215,7 @@ class LndClientTest {
             HttpClient mockHttp = mock(HttpClient.class);
             HttpResponse<String> mockResp = mock(HttpResponse.class);
             when(mockResp.body()).thenReturn(responseBody);
+            when(mockResp.statusCode()).thenReturn(200);
             doReturn(mockResp).when(mockHttp).send(any(HttpRequest.class), any());
             return new LndClient("localhost", 8080, "deadbeef", mockHttp);
         }
@@ -274,28 +275,29 @@ class LndClientTest {
         @Test
         @DisplayName("payInvoice parses SUCCEEDED status from NDJSON response")
         void payInvoice_succeededResponse_parsesFields() throws Exception {
-            String ndjson = "{\"result\":{\"payment_hash\":\"hash123\"," +
-                    "\"payment_preimage\":\"pre456\",\"status\":\"SUCCEEDED\"}}";
+            String preimage = "11".repeat(32);
+            String hash = LndPaymentFixtures.sha256Hex(preimage);
+            String ndjson = "{\"result\":{\"payment_hash\":\"" + hash + "\"," +
+                    "\"payment_preimage\":\"" + preimage + "\",\"status\":\"SUCCEEDED\"}}";
             LndClient client = clientWith(ndjson);
 
             LndClient.PayInvoiceResponse resp = client.payInvoice("lnbc100n1test");
 
-            assertEquals("hash123", resp.paymentHash());
-            assertEquals("pre456", resp.paymentPreimage());
+            assertEquals(hash, resp.paymentHash());
+            assertEquals(preimage, resp.paymentPreimage());
             assertEquals("SUCCEEDED", resp.status());
         }
 
         @Test
-        @DisplayName("payInvoice with FAILED status falls back to mock (non-strict client)")
-        void payInvoice_failedResponse_fallsBackToMock() throws Exception {
-            // parsePaymentResult throws RuntimeException for FAILED status,
-            // but in non-strict mode (package-private constructor), payInvoice catches it and returns mock.
+        @DisplayName("payInvoice with FAILED status throws, even on a non-strict client (never a mock success)")
+        void payInvoice_failedResponse_throwsEvenWhenNonStrict() throws Exception {
             String ndjson = "{\"result\":{\"payment_hash\":\"h\",\"status\":\"FAILED\"," +
                     "\"failure_reason\":\"FAILURE_REASON_NO_ROUTE\"}}";
             LndClient client = clientWith(ndjson);
 
-            LndClient.PayInvoiceResponse resp = client.payInvoice("lnbc100n1test");
-            assertEquals("MOCK", resp.status(), "FAILED LND response should produce a MOCK fallback response in non-strict mode");
+            PaymentFailedException ex = assertThrows(PaymentFailedException.class,
+                    () -> client.payInvoice("lnbc100n1test"));
+            assertEquals("FAILURE_REASON_NO_ROUTE", ex.getFailureReason());
         }
 
         @Test

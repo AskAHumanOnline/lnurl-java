@@ -115,6 +115,9 @@ malicious provider controls both the metadata and the hash anyway.
 
 ```java
 import online.askahuman.lnurl.lnd.LndClient;
+import online.askahuman.lnurl.lnd.PaymentFailedException;
+import online.askahuman.lnurl.lnd.PaymentOutcomeUnknownException;
+import online.askahuman.lnurl.lnd.PaymentTrackResult;
 
 // Connect to LND (reads macaroon file, configures TLS)
 LndClient lnd = LndClient.withMacaroonFile(
@@ -131,14 +134,45 @@ String paymentHash    = invoice.rHash();
 // Check payment status
 boolean paid = lnd.isInvoicePaid(paymentHash);
 
-// Pay an invoice (V2 router API)
-LndClient.PayInvoiceResponse payment = lnd.payInvoice(paymentRequest);
-System.out.println(payment.status()); // SUCCEEDED, FAILED, or MOCK (mock mode)
+// Pay an invoice (V2 router API). Returns only for a confirmed, verified payment.
+try {
+    LndClient.PayInvoiceResponse payment = lnd.payInvoice(paymentRequest);
+    System.out.println(payment.paymentPreimage()); // proof of payment; hashes to payment.paymentHash()
+} catch (PaymentFailedException e) {
+    // LND confirmed the payment failed. Nothing was sent; paying again is safe.
+    System.out.println(e.getFailureReason());
+} catch (PaymentOutcomeUnknownException e) {
+    // Timeout, dropped connection, still in flight, or an unrecognised answer. The payment
+    // may still settle: look it up before paying anything else.
+    PaymentTrackResult state = lnd.trackPayment(paymentHash); // SUCCEEDED, FAILED, IN_FLIGHT or NOT_INITIATED
+}
 
-// Graceful degradation: LndClient falls back to mock mode when LND is unavailable.
-// Mock invoices are considered "paid" after 5 seconds.
+// Graceful degradation (development only, no macaroon configured): LndClient falls back to
+// mock mode when LND is unreachable. Mock invoices are considered "paid" after 5 seconds.
 System.out.println(lnd.isConnected()); // false in mock mode
 ```
+
+#### Payment outcomes
+
+`payInvoice` distinguishes four cases, and treats anything it cannot positively classify as
+unknown rather than as a success or a failure:
+
+| Result | Meaning |
+|--------|---------|
+| returns | LND reported `SUCCEEDED` and the preimage hashes to the payment hash |
+| `PaymentFailedException` | LND confirmed the failure (`getFailureReason()` is a code, never gateway text) |
+| `PaymentOutcomeUnknownException` | HTTP timeout, dropped connection, `IN_FLIGHT`, error body, 5xx, or an unrecognised status |
+| `LnurlException` (plain) | the request provably never reached LND's router: connection refused or timed out, TLS handshake failed, HTTP 400/401/403 |
+
+The HTTP call has a connect timeout (10 s) and a request deadline (75 s) beyond LND's own 60 s
+attempt timeout, so a stalled node cannot block the caller indefinitely. `trackPayment` reads
+only the first state LND reports (`GET /v2/router/track/{hash}`), so it returns promptly for a
+payment still in flight. `NOT_INITIATED` means LND has no record of the payment.
+
+> **Behaviour change:** `payInvoice` used to treat every status other than `FAILED` as success
+> (including `IN_FLIGHT` and error bodies), had no HTTP deadline, and returned a mock success
+> for a `FAILED` payment on a non-strict client. It is now strict as described above, and
+> `FAILED` always throws.
 
 ### Spring Boot autoconfiguration
 
@@ -228,7 +262,7 @@ Attempting to resolve `alice@evil.com:9200` or a callback with `http://` will th
 - **Macaroon files**: store admin macaroons with `chmod 600`; never commit them to version control
 - **Challenge expiry**: default 300 seconds; use shorter values in production if tolerable for UX
 - **`consumeAndGetKey()`**: atomically removes the challenge, preventing race conditions where two concurrent callers could both claim the same authenticated session
-- **Mock mode**: `LndClient` and `LnurlPayClient` fall back gracefully when LND is unavailable; disable mock mode (`failOnResolutionError=true`) in production
+- **Mock mode**: `LndClient` and `LnurlPayClient` fall back to mock data when LND is unavailable in development; always configure a macaroon (strict `LndClient`) and `failOnResolutionError=true` in production
 
 ## License
 
