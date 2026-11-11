@@ -404,6 +404,15 @@ public class LndClient implements AutoCloseable {
     }
 
     /**
+     * Pay a Lightning invoice with the client's default routing fee limit (100 sats).
+     *
+     * @see #payInvoice(String, long)
+     */
+    public PayInvoiceResponse payInvoice(String paymentRequest) {
+        return payInvoice(paymentRequest, MAX_FEE_SATS);
+    }
+
+    /**
      * Pay a Lightning invoice via LND SendPaymentV2 (/v2/router/send).
      *
      * <p>Returns only when LND reports {@code SUCCEEDED} with a preimage that hashes to the
@@ -423,18 +432,23 @@ public class LndClient implements AutoCloseable {
      * In non-strict mode only connection-level failures fall back to a mock response.</p>
      *
      * @param paymentRequest the BOLT11 invoice to pay
+     * @param maxFeeSats     routing fee limit in satoshis, sent as {@code fee_limit_sat}
      * @return the successful payment response
+     * @throws IllegalArgumentException       if maxFeeSats is negative
      * @throws PaymentFailedException         if LND confirmed the payment failed
      * @throws PaymentOutcomeUnknownException if it is not known whether the payment was sent
      * @throws LnurlException                 if the request never reached LND
      */
-    public PayInvoiceResponse payInvoice(String paymentRequest) {
+    public PayInvoiceResponse payInvoice(String paymentRequest, long maxFeeSats) {
+        if (maxFeeSats < 0) {
+            throw new IllegalArgumentException("maxFeeSats must not be negative: " + maxFeeSats);
+        }
         HttpRequest request;
         try {
             String json = objectMapper.writeValueAsString(Map.of(
                     "payment_request", paymentRequest,
                     "timeout_seconds", PAYMENT_TIMEOUT_SECONDS,
-                    "fee_limit_sat", MAX_FEE_SATS,
+                    "fee_limit_sat", maxFeeSats,
                     "no_inflight_updates", true
             ));
             request = HttpRequest.newBuilder()
